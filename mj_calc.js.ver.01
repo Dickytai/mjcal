@@ -1,0 +1,70 @@
+#!/usr/bin/env node
+/**
+ * Mahjong Tile Efficiency Wrapper
+ * 接受命令行參數，計算向聽數和聽牌
+ */
+
+const { tilesToHand, RuleSet } = require('mahjong-tile-efficiency');
+
+// 解析命令行參數
+const args = process.argv.slice(2);
+const command = args[0];
+
+// 牌格式轉換：1萬->1m, 1索->1s, 1筒->1p, 東->1z
+function convertTile(tile) {
+    const map = {
+        '萬': 'm',
+        '索': 's',
+        '筒': 'p',
+        '東': '1z',
+        '南': '2z',
+        '西': '3z',
+        '北': '4z',
+        '中': '5z',
+        '發': '6z',
+        '白': '7z'
+    };
+    
+    for (const [suffix, letter] of Object.entries(map)) {
+        if (tile.endsWith(suffix)) {
+            const num = tile.replace(suffix, '');
+            return num + letter;
+        }
+    }
+    return tile;
+}
+
+// 計算向聽數
+function calShanten(tiles) {
+    const converted = tiles.map(convertTile);
+    const hand = tilesToHand(converted);
+    const rule = new RuleSet('Taiwan');  // 使用台灣牌規則
+    const shanten = rule.calShanten(hand);
+    const ukeire = rule.calUkeire(hand);
+    return { shanten, ukeire };
+}
+
+// 處理請求
+if (command === 'shanten') {
+    const tiles = JSON.parse(args[1]);
+    const result = calShanten(tiles);
+    console.log(JSON.stringify(result));
+} else if (command === 'ukeire') {
+    const tiles = JSON.parse(args[1]);
+    const result = calShanten(tiles);
+    console.log(JSON.stringify(result));
+} else if (command === 'waiting') {
+    const tiles = JSON.parse(args[1]);
+    const { shanten, ukeire } = calShanten(tiles);
+    
+    // 如果已經聽牌，使用Ukeire結果
+    if (shanten === 0 && ukeire.ukeire) {
+        const waiting = Object.keys(ukeire.ukeire).map(tile => ({
+            tile: tile,
+            count: ukeire.ukeire[tile]
+        }));
+        console.log(JSON.stringify({ shanten, waiting }));
+    } else {
+        console.log(JSON.stringify({ shanten, waiting: [] }));
+    }
+}

@@ -1,0 +1,518 @@
+#!/usr/bin/env python3
+"""
+🀄 麻將聽牌計算機 - Flask Web App
+功能編號:
+1. 13張/16張模式選擇 (setMode)
+2. 手牌/公開牌切換 (setInputMode)
+3. 百搭顯示 (renderButtons -> wildTiles)
+4. 花牌公開牌限制 (addTile -> isFlower)
+5. 每張牌最多4張 (addTile -> totalCount)
+6. 公開牌不影響手牌 (addTile)
+7. 算法調用 (/calc endpoint)
+8. 聽牌計算 (showResult waiting)
+9. 番數顯示 (showResult fan)
+10. 未聽牌顯示 (showResult shantenText)
+"""
+
+from flask import Flask, render_template, request, jsonify
+import json
+import os
+import subprocess
+from functools import lru_cache
+
+app = Flask(__name__)
+
+# ========================
+# 牌數據
+# ========================
+
+# Tile lookup cache (English codes -> Unicode)
+_TILE_CACHE = {
+    '1m':'🀇','2m':'🀈','3m':'🀉','4m':'🀊','5m':'🀋','6m':'🀌','7m':'🀍','8m':'🀎','9m':'🀏',
+    '1s':'🀐','2s':'🀑','3s':'🀒','4s':'🀓','5s':'🀔','6s':'🀕','7s':'🀖','8s':'🀗','9s':'🀘',
+    '1p':'🀙','2p':'🀚','3p':'🀛','4p':'🀜','5p':'🀝','6p':'🀞','7p':'🀟','8p':'🀠','9p':'🀡',
+    '1z':'🀀','2z':'🀁','3z':'🀂','4z':'🀃','5z':'🀄','6z':'🀅','7z':'🀆'
+}
+
+# TILES with English codes as keys (for JS frontend)
+TILES = {
+    '1m': {'suit': 'wan', 'value': 1, 'unicode': '🀇'}, '2m': {'suit': 'wan', 'value': 2, 'unicode': '🀈'},
+    '3m': {'suit': 'wan', 'value': 3, 'unicode': '🀉'}, '4m': {'suit': 'wan', 'value': 4, 'unicode': '🀊'},
+    '5m': {'suit': 'wan', 'value': 5, 'unicode': '🀋'}, '6m': {'suit': 'wan', 'value': 6, 'unicode': '🀌'},
+    '7m': {'suit': 'wan', 'value': 7, 'unicode': '🀍'}, '8m': {'suit': 'wan', 'value': 8, 'unicode': '🀎'},
+    '9m': {'suit': 'wan', 'value': 9, 'unicode': '🀏'},
+    '1s': {'suit': 'tiao', 'value': 11, 'unicode': '🀐'}, '2s': {'suit': 'tiao', 'value': 12, 'unicode': '🀑'},
+    '3s': {'suit': 'tiao', 'value': 13, 'unicode': '🀒'}, '4s': {'suit': 'tiao', 'value': 14, 'unicode': '🀓'},
+    '5s': {'suit': 'tiao', 'value': 15, 'unicode': '🀔'}, '6s': {'suit': 'tiao', 'value': 16, 'unicode': '🀕'},
+    '7s': {'suit': 'tiao', 'value': 17, 'unicode': '🀖'}, '8s': {'suit': 'tiao', 'value': 18, 'unicode': '🀗'},
+    '9s': {'suit': 'tiao', 'value': 19, 'unicode': '🀘'},
+    '1p': {'suit': 'tong', 'value': 21, 'unicode': '🀙'}, '2p': {'suit': 'tong', 'value': 22, 'unicode': '🀚'},
+    '3p': {'suit': 'tong', 'value': 23, 'unicode': '🀛'}, '4p': {'suit': 'tong', 'value': 24, 'unicode': '🀜'},
+    '5p': {'suit': 'tong', 'value': 25, 'unicode': '🀝'}, '6p': {'suit': 'tong', 'value': 26, 'unicode': '🀞'},
+    '7p': {'suit': 'tong', 'value': 27, 'unicode': '🀟'}, '8p': {'suit': 'tong', 'value': 28, 'unicode': '🀠'},
+    '9p': {'suit': 'tong', 'value': 29, 'unicode': '🀡'},
+    '1z': {'suit': 'zi', 'value': 31, 'unicode': '🀀'}, '2z': {'suit': 'zi', 'value': 32, 'unicode': '🀁'},
+    '3z': {'suit': 'zi', 'value': 33, 'unicode': '🀂'}, '4z': {'suit': 'zi', 'value': 34, 'unicode': '🀃'},
+    '5z': {'suit': 'zi', 'value': 35, 'unicode': '🀄'}, '6z': {'suit': 'zi', 'value': 36, 'unicode': '🀅'},
+    '7z': {'suit': 'zi', 'value': 37, 'unicode': '🀆'},
+    # Wildcards
+    '1j': {'suit': 'wild', 'value': 41, 'unicode': '🃏'},
+    '2j': {'suit': 'wild', 'value': 42, 'unicode': '🃏'},
+    '3j': {'suit': 'wild', 'value': 43, 'unicode': '🃏'},
+    '4j': {'suit': 'wild', 'value': 44, 'unicode': '🃏'},
+    '5j': {'suit': 'wild', 'value': 45, 'unicode': '🃏'},
+    '6j': {'suit': 'wild', 'value': 46, 'unicode': '🃏'},
+    '7j': {'suit': 'wild', 'value': 47, 'unicode': '🃏'},
+    '8j': {'suit': 'wild', 'value': 48, 'unicode': '🃏'},
+}
+
+FLOWER_TILES = {
+    '梅': {'unicode': '🀢', 'suit': 'flower'}, '蘭': {'unicode': '🀣', 'suit': 'flower'},
+    '菊': {'unicode': '🀤', 'suit': 'flower'}, '竹': {'unicode': '🀥', 'suit': 'flower'},
+    '春': {'unicode': '🀦', 'suit': 'season'}, '夏': {'unicode': '🀧', 'suit': 'season'},
+    '秋': {'unicode': '🀨', 'suit': 'season'}, '冬': {'unicode': '🀩', 'suit': 'season'},
+}
+
+WILDCARDS = {
+    '1j': {'name': '皇', '替代': '任意牌', '數量': 34, 'unicode': '皇', 'suit': 'wild', 'code': '1j'},
+    '2j': {'name': '合', '替代': '筒/索/萬', '數量': 27, 'unicode': '合', 'suit': 'wild', 'code': '2j'},
+    '3j': {'name': '萬', '替代': '任意萬', '數量': 9, 'unicode': '萬', 'suit': 'wild', 'code': '3j'},
+    '4j': {'name': '筒', '替代': '任意筒', '數量': 9, 'unicode': '筒', 'suit': 'wild', 'code': '4j'},
+    '5j': {'name': '索', '替代': '任意索', '數量': 9, 'unicode': '索', 'suit': 'wild', 'code': '5j'},
+    '6j': {'name': '風', '替代': '東南西北', '數量': 4, 'unicode': '風', 'suit': 'wild', 'code': '6j'},
+    '7j': {'name': '番', '替代': '中發白+風牌', '數量': 7, 'unicode': '番', 'suit': 'wild', 'code': '7j'},
+    '8j': {'name': '三元', '替代': '中發白內', '數量': 3, 'unicode': '三元', 'suit': 'wild', 'code': '8j'},
+}
+
+# ========================
+# Routes
+# ========================
+
+# ===== 網頁路由 =====
+@app.route('/')
+# ===== 首頁 =====
+def index():
+    return render_template('index.html', 
+                          tiles_json=TILES, 
+                          flower_json=FLOWER_TILES, 
+                          wildcards_json=WILDCARDS)
+
+@app.route('/calc', methods=['POST'])
+# ===== 計算API =====
+def calc():
+    import sys
+    print('=== DEBUG START ===')
+    data = request.json
+    hand = data.get('hand', [])
+    winning_tile = data.get('winning_tile')  # 選擇既胡牌 (只用於分析，不加入手牌)
+    wait_type = None
+    
+    open_tiles = data.get('open', [])
+    mode = data.get('mode', 16)
+    fan_config = data.get('fan_config', {})  # Fan config from frontend
+    is_zimo = data.get('is_zimo', False)  # 自摸
+    flowers = data.get('flowers', 0)  # 花牌數量
+    quan_wind = data.get('quan_wind', '')  # 圈風 (東/南/西/北)
+    wei_wind = data.get('wei_wind', '')  # 門風 (東/南/西/北)
+    print(f"DEBUG: is_zimo={is_zimo}, type={type(is_zimo)}")
+    
+    # 合併手牌 + 公開牌 一齊計算
+    all_tiles = hand + open_tiles
+    expected = len(all_tiles)
+    
+    # Pass open tiles count and hand tiles for 明/暗 detection
+    open_count = len(open_tiles)
+    # Pass hand/open tiles via environment variables
+    hand_json = json.dumps(hand)
+    open_json = json.dumps(open_tiles)
+
+    try:
+        env = os.environ.copy()
+        # Save fan_config to temp file
+        import tempfile
+        fan_config_path = tempfile.mktemp(suffix='.json')
+        with open(fan_config_path, 'w') as f:
+            json.dump(fan_config, f)
+        
+        env['HAND_TILES'] = hand_json
+        env['OPEN_TILES'] = open_json
+        env['FAN_CONFIG_PATH'] = fan_config_path
+        is_zimo_str = '1' if is_zimo else '0'
+        print(f"DEBUG: is_zimo={is_zimo}, is_zimo_str={is_zimo_str}")
+        print(f"DEBUG: quan_wind={repr(quan_wind)}, wei_wind={repr(wei_wind)}")
+        cmd = ['node', '/home/tai/mjcal/mj_calc.js', 'full', json.dumps(all_tiles), str(expected), str(mode), str(flowers), '0', is_zimo_str, '0', '0', '0', str(open_count), quan_wind, wei_wind]
+        print(f"DEBUG CMD: {cmd}")
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10, env=env)
+        if result.stderr:
+            print(f"NODE STDERR: {result.stderr}", file=sys.stderr)
+
+        if result.returncode != 0:
+            # Error occurred in node - return validation error
+            try:
+                error_data = json.loads(result.stdout)
+                return jsonify({'error': error_data.get('error', 'Error'), 'invalid': error_data.get('invalid', [])}), 400
+            except:
+                return jsonify({'error': 'Validation error'}), 400
+        
+        if result.returncode == 0:
+            if False and result.stderr:
+                print("STDERR:", result.stderr, file=sys.stderr)
+                print("STDERR:", result.stderr, file=sys.stderr)
+            node_result = json.loads(result.stdout)
+            
+            # Check for validation errors in result
+            if node_result.get('error'):
+                return jsonify({'error': node_result.get('error'), 'invalid': node_result.get('invalid', [])}), 400
+            
+            shanten = node_result.get('shanten', 0)
+            
+            # Winning hand info
+            winning_fan = 0
+            winning_breakdown = []
+            winning_combinations = []  # New: multiple combinations
+            
+            if shanten == -1:
+                waiting_with_fan = node_result.get('waiting_with_fan', [])
+                for wf in waiting_with_fan:
+                    if wf.get('tile') == '胡牌':
+                        winning_fan = wf.get('fan', 0)
+                        winning_breakdown = wf.get('breakdown', [])
+                        break
+                
+                # 計算聽牌類型 (獨獨/假獨/對碰/單吊/偏章/8面聽/13面聽)
+                import sys
+                if winning_tile:
+                    print(f'WAIT_TYPE: winning_tile={winning_tile}, hand_len={len(hand)}', file=sys.stderr)
+                    try:
+                        hand_16 = hand.copy()
+                        hand_16.remove(winning_tile)
+                        wait_result = subprocess.run([
+                            'node', '/home/tai/mjcal/mj_calc.js', 'full', json.dumps(hand_16),
+                            '16', '16', '0', '0', '1', '0', '0', '0', '0', '0', '0'
+                        ], capture_output=True, text=True, timeout=10, cwd="/home/tai/mjcal")
+                        wait_data = json.loads(wait_result.stdout)
+                        waiting_tiles = wait_data.get("waiting", [])
+                        if len(waiting_tiles) >= 13:
+                            wait_type = "13面聽"
+                        elif len(waiting_tiles) >= 8:
+                            wait_type = "8面聽"
+                        elif len(waiting_tiles) <= 7:
+                            wait_type = "多面聽(" + str(len(waiting_tiles)) + ")"
+                        elif len(waiting_tiles) == 2:
+                            wait_type = "偏章"
+                        elif len(waiting_tiles) == 1:
+                            from collections import Counter
+                            counts_16 = Counter(hand_16)
+                            winning_count = counts_16.get(winning_tile, 0)
+                            if winning_count == 2:
+                                wait_type = "對碰"
+                            elif winning_count == 3:
+                                wait_type = "假獨"
+                            else:
+                                wait_type = "獨獨"
+                    except Exception as e:
+                        print(f"wait_type error: {e}", file=sys.stderr)
+                # Get multiple combinations using enumerateMelds
+                try:
+                    combo_result = subprocess.run(
+                        ['node', '/home/tai/mjcal/mj_calc.js', 'test_multi', json.dumps(hand), json.dumps(open_tiles), str(len(open_tiles))],
+                        capture_output=True, text=True, timeout=10, cwd='/home/tai/mjcal'
+                    )
+                    if combo_result.returncode == 0:
+                        combo_data = json.loads(combo_result.stdout)
+                        winning_combinations = combo_data.get('results', [])
+                except:
+                    pass
+            
+            # Waiting tiles with fan info
+            waiting_tiles = node_result.get('waiting', [])
+            waiting_with_fan = node_result.get('waiting_with_fan', [])
+
+            waiting = []
+            for wt in waiting_tiles:
+                tile_code = wt.get('tile', '')
+                fan_info = next((w for w in waiting_with_fan if w.get('tile') == tile_code), {})
+                waiting.append({
+                    'tile': tile_code,
+                    'unicode': _TILE_CACHE.get(tile_code, '?'),
+                    'count': wt.get('count', 1),
+                    'fan': fan_info.get('fan', 1),
+                    'breakdown': fan_info.get('breakdown', [])
+                })
+
+            return jsonify({
+                'shanten': shanten, 
+                'waiting': waiting, 
+                'winning_fan': winning_fan, 
+                'winning_breakdown': winning_breakdown,
+                'winning_combinations': winning_combinations,
+                'wait_type': wait_type,
+                'wind_info': node_result.get('wind_info', None),
+                'wind_fan': node_result.get('wind_fan', 0)
+            })
+        else:
+            return jsonify({'shanten': -1, 'waiting': [], 'winning_fan': 0, 'winning_breakdown': []})
+    except Exception as e:
+        import traceback
+        print('ERROR:', str(e), file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return jsonify({'shanten': -1, 'waiting': [], 'winning_fan': 0, 'winning_breakdown': []})
+
+@app.route('/generate', methods=['GET'])
+# ===== 生成牌 =====
+def generate():
+    """Generate a valid 17-tile winning hand"""
+    import random
+    
+    # Strategy: Keep generating until we get a winning hand
+    for _ in range(500):
+        hand = []
+        counts = [0] * 34
+        
+        # Generate 5 melds
+        for _ in range(5):
+            # Try chow first
+            chows = []
+            for suit in range(3):
+                for start in range(7):
+                    i0 = suit * 9 + start
+                    # Check all 3 tiles have < 4 copies
+                    if counts[i0] < 4 and counts[i0+1] < 4 and counts[i0+2] < 4:
+                        chows.append([i0, i0+1, i0+2])
+            
+            if chows and random.random() > 0.3:
+                meld = random.choice(chows)
+            else:
+                # Try pong - only tiles with < 3 copies
+                pongs = [i for i in range(34) if counts[i] < 3]
+                if not pongs:
+                    break
+                meld = [random.choice(pongs)] * 3
+            
+            # Verify adding this meld won't exceed 4
+            valid = True
+            for idx in meld:
+                if counts[idx] + meld.count(idx) > 4:
+                    valid = False
+                    break
+            if not valid:
+                continue
+                
+            hand.extend(meld)
+            for idx in meld:
+                counts[idx] += 1
+        
+        if len(hand) != 15:
+            continue
+            
+        # Generate pair - only tiles with < 2 copies
+        pairs = [i for i in range(34) if counts[i] < 2]
+        if not pairs:
+            continue
+        pair = [random.choice(pairs)] * 2
+        hand.extend(pair)
+        counts[pair[0]] += 2
+        
+        # Convert to tile names
+        suits = ['m', 's', 'p', 'z']
+        tiles = []
+        for idx in hand:
+            suit_idx = idx // 9  # 0-2 for m,s,p, 3 for z
+            num = idx % 9 + 1
+            if suit_idx >= 3:
+                # Z (winds/dragon): 27->1z, 28->2z, etc
+                tiles.append(str(idx - 27 + 1) + 'z')
+            else:
+                tiles.append(str(num) + suits[suit_idx])
+        
+        # Validate with mj_calc.js
+        try:
+            result = subprocess.run(
+                ['node', '/home/tai/mjcal/mj_calc.js', 'full', json.dumps(tiles), '17'],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0:
+                node_result = json.loads(result.stdout)
+                if node_result.get('shanten', 0) == -1:
+                    # Sort tiles
+                    def tile_sort(t):
+                        suit_order = {'m': 0, 's': 1, 'p': 2, 'z': 3}
+                        s = t[-1]
+                        n = int(t[:-1])
+                        return (suit_order.get(s, 3), n)
+                    tiles.sort(key=tile_sort)
+                    return jsonify({'hand': tiles})
+        except:
+            pass
+    
+    return jsonify({'error': 'Failed to generate winning hand'})
+
+# ========== Pattern Examples API ==========
+import os
+import sys
+from datetime import datetime
+
+EXAMPLES_FILE = '/home/tai/mjcal/pattern_examples.json'
+
+# ===== 範例載入 =====
+def load_examples():
+    """Load pattern examples from file"""
+    if os.path.exists(EXAMPLES_FILE):
+        try:
+            with open(EXAMPLES_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+# ===== 範例保存 =====
+def save_examples(examples):
+    """Save pattern examples to file"""
+    with open(EXAMPLES_FILE, 'w') as f:
+        json.dump(examples, f, indent=2)
+
+@app.route('/save_example', methods=['POST'])
+# ===== 保存範例 =====
+def save_example():
+    """Save a pattern example"""
+    data = request.json
+    pattern = data.get('pattern', '')
+    open_tiles = data.get('open_tiles', [])
+    hand_tiles = data.get('hand_tiles', [])
+    is_zimo = data.get('is_zimo', False)
+    
+    if not pattern or (not open_tiles and not hand_tiles):
+        return jsonify({'error': 'Invalid data'}), 400
+    
+    examples = load_examples()
+    
+    if pattern not in examples:
+        examples[pattern] = []
+    
+    examples[pattern].append({
+        'open_tiles': open_tiles,
+        'hand_tiles': hand_tiles,
+        'is_zimo': is_zimo,
+        'time': datetime.now().isoformat()
+    })
+    
+    save_examples(examples)
+    
+    return jsonify({'success': True, 'count': len(examples[pattern])})
+
+
+@app.route('/clear_examples', methods=['POST'])
+# ===== 清除範例 =====
+def clear_examples():
+    """Clear all pattern examples"""
+    save_examples({})
+    return jsonify({'success': True})
+
+# Test endpoint for multiple combinations (Phase 4)
+@app.route('/test_multi_combo', methods=['POST'])
+# ===== 測試多組合 =====
+def test_multi_combo():
+    """Test multiple combinations for a hand"""
+    data = request.get_json()
+    tiles = data.get('hand', [])
+    
+    if not tiles:
+        return jsonify({'error': 'No tiles provided'})
+    
+    # Run Node.js test script
+    import subprocess
+    result = subprocess.run(
+        ['node', '/home/tai/mjcal/mj_calc.js', 'test_multi', ','.join(tiles)],
+        capture_output=True, text=True, cwd='/home/tai/mjcal'
+    )
+    
+    return jsonify({
+        'output': result.stdout,
+        'error': result.stderr
+    })
+
+    
+
+# ============================================================
+# 番數配置 API
+# ============================================================
+import json
+import os
+
+FAN_CONFIG_FILE = '/home/tai/mjcal/fan_config.json'
+
+def load_fan_config():
+    try:
+        with open(FAN_CONFIG_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except:
+        return {"default": {"name": "預設", "patterns": {}}}
+
+def save_fan_config(config):
+    with open(FAN_CONFIG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+
+@app.route('/api/fan_config', methods=['GET'])
+def get_fan_config():
+    config = load_fan_config()
+    return jsonify(config)
+
+@app.route('/api/fan_config', methods=['POST'])
+def update_fan_config():
+    data = request.json
+    config = load_fan_config()
+    
+    preset_name = data.get('name', '自訂')
+    new_patterns = data.get('patterns', {})
+    
+    # Prevent overwriting default preset
+    if preset_name == 'default':
+        return jsonify({"status": "error", "message": "無法修改預設番種！請選擇其他番種。"}), 400
+    
+    # Merge with existing patterns (only update changed ones)
+    existing = config.get(preset_name, {}).get('patterns', {})
+    existing.update(new_patterns)  # Update only the patterns sent
+    
+    config[preset_name] = {
+        "name": preset_name,
+        "patterns": existing
+    }
+    
+    save_fan_config(config)
+    return jsonify({"status": "ok", "message": "已保存: " + preset_name})
+
+@app.route('/api/fan_presets', methods=['GET'])
+def get_fan_presets():
+    config = load_fan_config()
+    presets = []
+    for key, val in config.items():
+        presets.append({"id": key, "name": val.get("name", key)})
+    return jsonify(presets)
+
+@app.route('/api/fan_preset/<preset_id>', methods=['GET'])
+def get_fan_preset(preset_id):
+    config = load_fan_config()
+    if preset_id in config:
+        return jsonify(config[preset_id])
+    return jsonify({"error": "Preset not found"}), 404
+
+@app.route('/api/fan_config_delete', methods=['POST'])
+def delete_fan_preset():
+    data = request.json
+    preset_name = data.get('name', '')
+    
+    if not preset_name or preset_name == 'default':
+        return jsonify({"status": "error", "message": "無法刪除預設番種"}), 400
+    
+    config = load_fan_config()
+    if preset_name in config:
+        del config[preset_name]
+        save_fan_config(config)
+        return jsonify({"status": "ok", "message": "已刪除: " + preset_name})
+    return jsonify({"status": "error", "message": "番種不存在"}), 404
+
+
+if __name__ == '__main__':
+    print("🀄 麻將聽牌計算機 - http://192.168.1.88:5000")
+    app.run(host='0.0.0.0', port=5000, debug=False)

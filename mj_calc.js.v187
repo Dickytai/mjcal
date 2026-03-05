@@ -1,0 +1,3407 @@
+#!/usr/bin/env node
+/**
+ * Mahjong Tile Efficiency Wrapper v06
+ * 優化版：支持多款百搭 (皇=任意, 合=筒索萬)
+ */
+
+const { tilesToHand, RuleSet } = require('mahjong-tile-efficiency');
+
+const args = process.argv.slice(2);
+const command = args[0];
+
+// 全域模式：13張或16張
+let TILE_MODE = 16;  // Default to 16 tile mode
+
+// 34種牌
+const TILES = [
+    '1m','2m','3m','4m','5m','6m','7m','8m','9m',
+    '1s','2s','3s','4s','5s','6s','7s','8s','9s',
+    '1p','2p','3p','4p','5p','6p','7p','8p','9p',
+    '1z','2z','3z','4z','5z','6z','7z'
+];
+
+// ============================================================
+// Fan Configuration Loading
+// ============================================================
+function loadFanConfig() {
+    // First check environment variable (from frontend)
+    const configPath = process.env.FAN_CONFIG_PATH;
+    if (configPath) {
+        try {
+            const fs = require('fs');
+            if (fs.existsSync(configPath)) {
+                const configData = fs.readFileSync(configPath, 'utf8');
+                const config = JSON.parse(configData);
+                return config;
+            }
+        } catch(e) {
+            console.log('Warning: Could not load fan_config from temp file');
+        }
+    }
+    
+    // Fallback to default config file
+    try {
+        const fs = require('fs');
+        const defaultPath = '/home/tai/mjcal/fan_config.json';
+        if (fs.existsSync(defaultPath)) {
+            const configData = fs.readFileSync(defaultPath, 'utf8');
+            const config = JSON.parse(configData);
+            if (config.default && config.default.patterns) {
+                return config.default.patterns;
+            }
+        }
+    } catch(e) {
+        console.log('Warning: Could not load fan_config.json');
+    }
+    return {};
+}
+
+function getFan(patternName, defaultFan) {
+    const config = loadFanConfig();
+    return config[patternName] || defaultFan;
+}
+
+// ============================================================
+
+// 全部既index (0-33)
+const ALL_INDICES = [];
+for (let i = 0; i < 34; i++) ALL_INDICES.push(i);
+
+const TILE_MAP = {
+    '萬': 'm', '索': 's', '筒': 'p',
+    '東': '1z', '南': '2z', '西': '3z', '北': '4z',
+    '中': '5z', '發': '6z', '白': '7z'
+};
+
+// 34種牌既index: 0-8=m, 9-17=s, 18-26=p, 27-33=z
+const MAN_INDICES = [];
+for (let i = 0; i < 9; i++) MAN_INDICES.push(i);
+const SUO_INDICES = [];
+for (let i = 9; i < 18; i++) SUO_INDICES.push(i);
+const TONG_INDICES = [];
+for (let i = 18; i < 27; i++) TONG_INDICES.push(i);
+const FENG_INDICES = [27, 28, 29, 30];  // 東南西北
+const FAN_INDICES = [31, 32, 33];       // 中發白
+const FENG_FAN_INDICES = [27, 28, 29, 30, 31, 32, 33];  // 風牌+番 (7種: 東南西北中發白)
+const SUIT_INDICES = [...MAN_INDICES, ...SUO_INDICES, ...TONG_INDICES]; // 筒索萬 (27種)
+
+// 百搭定義：可以變成咩牌
+const WILDCARD_TYPES = {
+    '皇': { name: '皇', indices: ALL_INDICES },      // 任意牌 (34種)
+    '萬': { name: '萬', indices: MAN_INDICES },     // 萬 (9種)
+    '筒': { name: '筒', indices: TONG_INDICES },    // 筒 (9種)
+    '索': { name: '索', indices: SUO_INDICES },     // 索 (9種)
+    '合': { name: '合', indices: SUIT_INDICES },    // 筒索萬 (27種)
+    '風': { name: '風', indices: FENG_INDICES },    // 風牌 (4種)
+    '番': { name: '番', indices: FENG_FAN_INDICES }, // 風牌+番 (7種)
+    '中發白': { name: '中發白', indices: FAN_INDICES } // 中發白 (3種)
+};
+
+// 預先轉換所有牌
+let tileIdCounter = 0;
+
+function preprocessTiles(tiles) {
+    const counts = new Array(34).fill(0);
+    const wildcards = { '皇': 0, '萬': 0, '筒': 0, '索': 0, '合': 0, '風': 0, '番': 0, '中發白': 0 };
+    const tileObjects = [];  // Track tiles with unique IDs
+    
+    // Map numeric codes to Chinese names
+    const jCodeMap = {
+        '1j': '皇', '2j': '合', '3j': '萬', '4j': '筒',
+        '5j': '索', '6j': '風', '7j': '番', '8j': '中發白'
+    };
+    
+    for (let t of tiles) {
+        // Convert 1j, 2j, etc. to Chinese names
+        if (jCodeMap[t]) {
+            t = jCodeMap[t];
+        }
+        
+        if (WILDCARD_TYPES[t]) {
+            wildcards[t]++;
+            tileObjects.push({ id: tileIdCounter++, value: t, isWildcard: true });
+        } else {
+            const converted = convertTile(t);
+            const idx = TILES.indexOf(converted);
+            if (idx >= 0) {
+                counts[idx]++;
+                tileObjects.push({ id: tileIdCounter++, value: converted, index: idx });
+            }
+        }
+    }
+    
+    return { counts, wildcards, tileObjects };
+}
+
+function convertTile(tile) {
+    for (const [s, l] of Object.entries(TILE_MAP)) {
+        if (tile.endsWith(s)) return tile.replace(s, '') + l;
+    }
+    return tile;
+}
+
+// Multiset分配：支持多款百搭
+function* generateDistributions(counts, wildcards) {
+    const totalWildcards = Object.values(wildcards).reduce((a, b) => a + b, 0);
+    if (totalWildcards === 0) {
+        yield counts;
+        return;
+    }
+    
+    // 將百搭轉為數組，每個百搭有自己既可用indices
+    let wildcardList = [];
+    const wildcardKeys = ['皇', '萬', '筒', '索', '合', '風', '番', '中發白'];
+    for (const key of wildcardKeys) {
+        for (let i = 0; i < wildcards[key]; i++) {
+            wildcardList.push(WILDCARD_TYPES[key].indices);
+        }
+    }
+    
+    // 遞迴分配
+    function* distribute(wildcardIdx, current) {
+        if (wildcardIdx >= wildcardList.length) {
+            yield [...current];
+            return;
+        }
+        
+        const allowed = wildcardList[wildcardIdx];
+        // 呢個百搭可以選擇既牌
+        for (const idx of allowed) {
+            if (current[idx] < 4) {
+                current[idx]++;
+                yield* distribute(wildcardIdx + 1, current);
+                current[idx]--;
+            }
+        }
+    }
+    
+    yield* distribute(0, [...counts]);
+}
+
+// 計算七對子shanten
+// ============================================================
+// 七對子 (7 Pairs) - 只適用於13張模式
+// ============================================================
+
+function sevenPairsShanten(counts, tileMode = 16) {
+    // 16張模式無七對子
+    if (tileMode === 16) {
+        return 999;
+    }
+    
+    // 計算牌型
+    let purePairs = 0;
+    let singles = 0;
+    let trips = 0; // 3張同款
+    
+    for (let i = 0; i < 34; i++) {
+        if (counts[i] === 2) {
+            purePairs++;
+        } else if (counts[i] === 1) {
+            singles++;
+        } else if (counts[i] === 3) {
+            trips++;
+        }
+    }
+    
+    // 計算總牌數
+    let total = 0;
+    for (let i = 0; i < 34; i++) {
+        total += counts[i];
+    }
+    
+    // 13張模式：七對子
+    // 7對 = 14張 = 胡牌
+    if (purePairs === 7 && total === 14) return -1;
+    
+    // 6對 + 1單張 (13張) = 聽牌 (等1張變7對)
+    if (purePairs === 6 && singles === 1 && total === 13) return 0;
+    
+    // 5對 + 3張同款 (13張) = 聽牌 (等該張變坎)
+    if (purePairs === 5 && trips === 1 && singles === 0 && total === 13) return 0;
+    
+    // 4對 + 5單張 (13張) = 差2張
+    if (purePairs === 4 && total === 13) return 2;
+    
+    // 7對 (13張) = 聽牌 (等第14張)
+    if (purePairs === 7 && total === 13) return 0;
+    
+    // 6對 (12張) = 差1張
+    if (purePairs === 6 && total === 12) return 1;
+    
+    // 5對 (10張) = 差2張
+    if (purePairs === 5 && total === 10) return 2;
+    
+    // 4對 (8張) = 差3張
+    if (purePairs === 4 && total === 8) return 3;
+    
+    // 3對 (6張) = 差4張
+    if (purePairs === 3 && total === 6) return 4;
+    
+    // 其他
+    return 7 - purePairs;
+}
+
+function sevenPairsWaiting(counts) {
+    let purePairs = 0;
+    let singles = 0;
+    let trips = 0; // 3張同款
+    
+    for (let i = 0; i < 34; i++) {
+        if (counts[i] === 2) {
+            purePairs++;
+        } else if (counts[i] === 1) {
+            singles++;
+        } else if (counts[i] === 3) {
+            trips++;
+        }
+    }
+    
+    let total = 0;
+    for (let i = 0; i < 34; i++) total += counts[i];
+    
+    const waitingMap = {};
+    
+    // 13張模式：6對 + 1單張 (13張) = 等果張單張變對
+    if (purePairs === 6 && singles === 1 && total === 13) {
+        for (let i = 0; i < 34; i++) {
+            if (counts[i] === 1) {
+                waitingMap[TILES[i]] = 1;
+            }
+        }
+        return waitingMap;
+    }
+    
+    // 13張模式：5對 + 3張同款 (13張) = 等該張變坎
+    if (purePairs === 5 && trips === 1 && singles === 0 && total === 13) {
+        for (let i = 0; i < 34; i++) {
+            if (counts[i] === 3) {
+                waitingMap[TILES[i]] = 1;
+            }
+        }
+        return waitingMap;
+    }
+    
+    // 7對 (13張) = 等任何一張變7對 (14張)
+    if (purePairs === 7 && total === 13) {
+        for (let i = 0; i < 34; i++) {
+            if (counts[i] >= 1) {
+                waitingMap[TILES[i]] = 1;
+            }
+        }
+        return waitingMap;
+    }
+    
+    // 6對 (12張) = 等1張變7對
+    if (purePairs === 6 && total === 12) {
+        for (let i = 0; i < 34; i++) {
+            if (counts[i] === 2) {
+                waitingMap[TILES[i]] = 1;
+            }
+        }
+        return waitingMap;
+    }
+    
+    return waitingMap;
+}
+
+// ============================================================
+// 嚦咕嚦咕 (Li Gu Li Gu) - 台灣牌 16張牌型
+// 牌型：7對 + 1坎 = 17張胡牌
+// 理解：count=4=2對，count=3+百搭=當2對
+// ============================================================
+
+function liGuLiGuShanten(counts, wildcards = {}) {
+    // 參考 mahjong-tile-efficiency: 16 tiles, 7 pairs with a triplet
+    let pairs = 0;
+    let hasTriplet = false;
+    
+    // 百搭數量
+    const totalWildcards = Object.values(wildcards).reduce((a, b) => a + b, 0);
+    
+    for (let i = 0; i < 34; i++) {
+        const count = counts[i] || 0;
+        if (count === 2) {
+            pairs++;           // 對 = 1 pair
+        } else if (count === 3) {
+            pairs++;           // 坎 = 1 pair (!)
+            hasTriplet = true;
+        } else if (count === 4) {
+            pairs += 2;        // 4張 = 2 pairs
+        }
+    }
+    
+    // 計算總牌數
+    let total = 0;
+    for (let i = 0; i < 34; i++) {
+        total += counts[i] || 0;
+    }
+    total += totalWildcards;
+    
+    // 參考 mahjong-tile-efficiency logic:
+    // shanten = 8 - pairs - (hasTriplet ? 1 : 0)
+    // -1 = winning (pairs >= 7 AND hasTriplet)
+    // 0 = tenpai
+    
+    if (total < 16) return Infinity;  // 16張模式最少16張
+    
+    // Winning: 7 pairs + 1 triplet = 17 tiles
+    if (pairs >= 7 && hasTriplet && total === 17) return -1;
+    
+    // Winning: 8 pairs = 16 tiles (no triplet, but 8 pairs = winning?)
+    // Actually 嚦咕 requires a triplet, so this shouldn't count
+    
+    // Tenpai: need 1 more to complete
+    if (pairs >= 7 && hasTriplet && total === 16) return 0;
+    
+    // Calculate shanten
+    return 8 - pairs - (hasTriplet ? 1 : 0);
+}
+
+function liGuLiGuWaiting(counts, wildcards = {}) {
+    // 百搭數量
+    const totalWildcards = Object.values(wildcards).reduce((a, b) => a + b, 0);
+    
+    // 使用與shanten相同既邏輯
+    let pairs = 0;
+    let hasTriplet = false;
+    
+    for (let i = 0; i < 34; i++) {
+        const count = counts[i] || 0;
+        if (count === 2) {
+            pairs++;           // 對 = 1 pair
+        } else if (count === 3) {
+            pairs++;           // 坎 = 1 pair
+            hasTriplet = true;
+        } else if (count === 4) {
+            pairs += 2;        // 4張 = 2 pairs
+        }
+    }
+    
+    let total = 0;
+    for (let i = 0; i < 34; i++) total += counts[i] || 0;
+    
+    const waitingMap = {};
+    
+    // 參考 mahjong-tile-efficiency: shanten = 8 - pairs - (hasTriplet ? 1 : 0)
+    // Winning = pairs >= 7 AND hasTriplet AND total === 17
+    // Tenpai = pairs >= 7 AND hasTriplet AND total === 16
+    
+    // 7對 + 1坎 (17張) - 已經胡牌，無waiting
+    if (pairs >= 7 && hasTriplet && total === 17) {
+        return {};
+    }
+    
+    // 6對 + 1坎 + 1張 (16張) - 聽牌
+    // 等果張變對
+    if (pairs >= 6 && hasTriplet && total === 16) {
+        for (let i = 0; i < 34; i++) {
+            if (counts[i] === 1) {
+                waitingMap[TILES[i]] = 1;
+            }
+        }
+        return waitingMap;
+    }
+    
+    // 7對 (16張) - 缺少1坎
+    if (pairs >= 7 && total === 16) {
+        // 等任何一張變坎
+        for (let i = 0; i < 34; i++) {
+            if (counts[i] >= 1) {
+                waitingMap[TILES[i]] = 1;
+            }
+        }
+        return waitingMap;
+    }
+    
+    // 如果有百搭既情況
+    if (totalWildcards > 0) {
+        // 特殊情況：2坎+4對+1單張+1百搭
+        // 等牌 = 現有坎既牌 + 單張本身 (因為百搭可以令3張變4張=2對)
+        if (pongs === 2 && purePairs === 4 && singles === 1) {
+            const waitingMap2 = {};
+            
+            // 現有坎既牌 (可以變第4張)
+            for (let i = 0; i < 34; i++) {
+                if (counts[i] >= 3) {
+                    waitingMap2[TILES[i]] = 1;
+                }
+            }
+            // 單張本身 (可以同百搭變坎)
+            for (let i = 0; i < 34; i++) {
+                if (counts[i] === 1) {
+                    waitingMap2[TILES[i]] = 1;
+                }
+            }
+            return waitingMap2;
+        }
+    }
+    
+    return waitingMap;
+}
+
+// 計算十六不搭shanten
+// 16不搭: 7字牌 + 3款唔岩連既牌 (如147, 258, 369)
+// 支持任意張數
+function sixteenNoConnectShanten(counts) {
+    // 檢查是否有7隻字牌 (東南西北中發白)
+    let honorCount = 0;
+    for (let i = 27; i < 34; i++) {
+        honorCount += counts[i];
+    }
+    
+    // 計算總牌數
+    let total = 0;
+    for (let i = 0; i < 34; i++) {
+        total += counts[i];
+    }
+    
+    // 十六不搭需要至少7字牌 + 3數牌
+    if (honorCount < 7) return 999;
+    
+    // 計算非字牌既數量
+    let suitCount = 0;
+    for (let i = 0; i < 27; i++) {
+        suitCount += counts[i];
+    }
+    
+    // 十六不搭 = 7字牌 + 9數牌 (16張)
+    // 如果有岩既數量，設為聽牌
+    if (honorCount === 7 && suitCount === 9) {
+        return 0; // 聽牌
+    } else if (honorCount >= 7 && suitCount >= 9) {
+        // 需要既張數
+        return 16 - total;
+    }
+    
+    return 999;
+}
+
+// 計算十六不搭既waiting
+// 16不搭聽牌既時候，等任何一張可以湊成對既牌
+function sixteenNoConnectWaiting(counts) {
+    const waitingMap = {};
+    
+    // 16不搭聽牌時，等任何一張手中既單張牌
+    // 牌型：7字牌 + 9數牌 (全部都係單張)
+    for (let i = 0; i < 34; i++) {
+        const currentCount = counts[i];
+        // 如果呢張牌岩岩有1張，可以等呢張變對
+        if (currentCount === 1) {
+            waitingMap[TILES[i]] = 1;
+        }
+    }
+    return waitingMap;
+}
+
+// ============================================================
+// 十三幺 (13 Yao) - 16張台灣牌屋規版本
+// 牌型：13孤張 (1,9 萬筒索 + 字牌) + 1組面子 (刻子或順子) = 17張胡牌
+// ============================================================
+
+function thirteenYiShanten(counts) {
+    // 13款幺九牌
+    const yiTiles = [0, 8, 9, 17, 18, 26, 27, 28, 29, 30, 31, 32, 33]; // 1m,9m,1s,9s,1p,9p,1z-7z
+    
+    // 計算有幾款幺九牌 (每款至少1張)
+    let yiCount = 0;
+    for (const idx of yiTiles) {
+        if (counts[idx] > 0) {
+            yiCount++;
+        }
+    }
+    
+    // 計算總牌數
+    let total = 0;
+    for (let i = 0; i < 34; i++) total += counts[i];
+    
+    // 必須有曬13款幺九牌
+    if (yiCount !== 13) {
+        return 999; // 唔岩十三幺
+    }
+    
+    // 十三幺結構：
+    // 13張模式：13孤張 → 差1張
+    // 13孤張 + 1張任意幺九牌 (14張) → 胡牌
+    
+    if (total === 14) {
+        // 13孤張 + 1張任意幺九牌 = 胡牌
+        return -1;
+    } else if (total === 13) {
+        // 13孤張 → 差1張
+        return 1;
+    } else if (total === 15) {
+        // 13孤張 + 2張 → 差1張 (等其中一張變對)
+        return 1;
+    } else if (total === 16) {
+        // 16張模式：13孤張 + 1組面子 = 聽牌
+        return 0;
+    } else if (total === 17) {
+        // 有對 = 胡牌
+        let hasPair = false;
+        for (let i = 0; i < 34; i++) {
+            if (counts[i] >= 2) hasPair = true;
+        }
+        if (hasPair) return -1;
+        return 0;
+    }
+    
+    return 14 - total;
+}
+
+function thirteenYiWaiting(counts) {
+    const waitingMap = {};
+    
+    // 13款幺九牌 (1,9 of each suit + honors)
+    const yiTiles = [0, 8, 9, 17, 18, 26, 27, 28, 29, 30, 31, 32, 33];
+    
+    // 計算總牌數
+    let total = 0;
+    for (let i = 0; i < 34; i++) total += counts[i];
+    
+    // 13張模式：13孤張 (13張) → 等任何一張幺九牌 (14張 = 胡牌)
+    if (total === 13) {
+        for (let i of yiTiles) {
+            if (counts[i] >= 1 && counts[i] < 4) {
+                waitingMap[TILES[i]] = 1;
+            }
+        }
+    }
+    
+    // 16張模式：13孤張 + 1組面子 = 聽牌
+    if (total === 16) {
+        for (let i of yiTiles) {
+            if (counts[i] >= 1 && counts[i] < 4) {
+                waitingMap[TILES[i]] = 1;
+            }
+        }
+    }
+    
+    return waitingMap;
+}
+
+// 檢查牌型是否岩胡牌 (5 sets + 1 pair = 17張)
+// 使用遞迴嘗試所有可能性
+function isValidWinningHand(counts) {
+    // Helper function to check if remaining tiles can form valid hand
+    // 支持任意張數：只需要形成 sets + pair，張數可以唔同
+    function* tryRemove(c, setsRemoved, pairsRemoved) {
+        // 計算總張數
+        const total = c.reduce((a, b) => a + b, 0);
+        
+        // 成功條件：有1對 + 冇牌剩
+        // sets可以係任意數量 (3, 4, 5...)
+        if (pairsRemoved === 1 && total === 0) {
+            yield true;
+            return;
+        }
+        
+        // 嘗試移除刻子 (3 same tiles)
+        for (let i = 0; i < 34; i++) {
+            if (c[i] >= 3) {
+                c[i] -= 3;
+                yield* tryRemove(c, setsRemoved + 1, pairsRemoved);
+                c[i] += 3;
+            }
+        }
+        
+        // 嘗試移除順子 (sequences) - 只需嘗試數牌
+        for (let i = 0; i < 27; i++) {
+            if (c[i] > 0 && c[i+1] > 0 && c[i+2] > 0) {
+                c[i]--; c[i+1]--; c[i+2]--;
+                yield* tryRemove(c, setsRemoved + 1, pairsRemoved);
+                c[i]++; c[i+1]++; c[i+2]++;
+            }
+        }
+        
+        // 嘗試移除對子 (pair) - 只需要1對
+        if (pairsRemoved === 0) {
+            for (let i = 0; i < 34; i++) {
+                if (c[i] >= 2) {
+                    c[i] -= 2;
+                    yield* tryRemove(c, setsRemoved, pairsRemoved + 1);
+                    c[i] += 2;
+                }
+            }
+        }
+    }
+    
+    // 遞迴檢查
+    const c = [...counts];
+    for (const _ of tryRemove(c, 0, 0)) {
+        return true;  // 如果有任何一個 path 成功，就係 valid
+    }
+    return false;
+}
+
+// 計算shanten (快速版)
+function quickShanten(counts) {
+    // 先計標準麻雀shanten - 支持任意張數
+    try {
+        // 轉為tiles array
+        const tiles = [];
+        for (let i = 0; i < 34; i++) {
+            for (let j = 0; j < counts[i]; j++) {
+                tiles.push(TILES[i]);
+            }
+        }
+        
+        const hand = tilesToHand(tiles);
+        const rule = new RuleSet('Taiwan');
+        let shanten = rule.calShanten(hand);
+        
+        // 如果library話已經胡牌(-1)，但實際牌型唔岩，就改為0(聽牌)
+        if (shanten === -1 && !isValidWinningHand(counts)) {
+            // 檢查係咪已經聽牌 (差1張)
+            // 支持任意張數：只要張數 >= 13
+            let total = 0;
+            for (let i = 0; i < 34; i++) total += counts[i];
+            
+            // 13張或以上先考慮聽牌
+            if (total >= 13) {
+                shanten = 0; // 聽牌
+            } else {
+                // 張數太少，設為需要既張數
+                shanten = 14 - total; // 需要既張數
+            }
+        }
+        
+        return shanten;
+    } catch (e) {
+        return 999;
+    }
+}
+
+// 計算ukeire (完整版)
+function calcUkeire(counts) {
+    try {
+        const tiles = [];
+        for (let i = 0; i < 34; i++) {
+            for (let j = 0; j < counts[i]; j++) {
+                tiles.push(TILES[i]);
+            }
+        }
+        
+        const hand = tilesToHand(tiles);
+        const rule = new RuleSet('Taiwan');
+        return rule.calUkeire(hand);
+    } catch (e) {
+        return null;
+    }
+}
+
+// 計算某distribution既min shanten (快速版，用generateDistributions)
+function getMinShanten(counts, wildcards, tileMode = 16) {
+    const totalWildcards = Object.values(wildcards).reduce((a, b) => a + b, 0);
+    
+    // 標準麻雀shanten
+    let minS = 999;
+    if (totalWildcards === 0) {
+        minS = quickShanten(counts);
+    } else {
+        for (const c of generateDistributions(counts, wildcards)) {
+            const s = quickShanten(c);
+            if (s < minS) {
+                minS = s;
+                if (minS === -1) break;
+            }
+        }
+    }
+    
+    // 16張模式：如果library話胡牌但岩岩係7對，要視為無效
+    // (因為16張模式無七對子)
+    if (tileMode === 16 && minS === -1) {
+        // Check if it's 7 pairs
+        let purePairs = 0;
+        for (let i = 0; i < 34; i++) {
+            if (counts[i] === 2) purePairs++;
+        }
+        if (purePairs >= 7) {
+            minS = 999; // Invalid in 16-tile mode
+        }
+    }
+    
+    // 根據mode選擇牌型邏輯
+    let bestS = minS;
+    
+    if (tileMode === 13) {
+        // 13張模式：七對子、十三幺
+        const spS = sevenPairsShanten(counts, TILE_MODE);
+        const tyS = thirteenYiShanten(counts);
+        bestS = Math.min(minS, spS, tyS);
+    } else {
+        // 16張模式：嚦咕嚦咕、十六不搭、十三幺(屋規) (無七對子)
+        const lglgS = liGuLiGuShanten(counts, wildcards);
+        const sncS = sixteenNoConnectShanten(counts);
+        const tyS = thirteenYiShanten(counts);
+        
+        bestS = Math.min(minS, lglgS, sncS, tyS);
+    }
+    
+    return bestS;
+}
+
+// 測試加入一張牌後既min shanten (優化使用皇)
+function testWaitingTile(baseCounts, baseWildcards, testTileIdx, tileMode = 16) {
+    const testCounts = [...baseCounts];
+    testCounts[testTileIdx]++;
+    
+    return getMinShanten(testCounts, baseWildcards, tileMode);
+}
+
+// 完整既waiting計算：考慮晒所有可能性
+function calculateWaiting(counts, wildcards, tileMode = 16) {
+    const waitingMap = {};
+    const minShanten = getMinShanten(counts, wildcards, tileMode);
+    const spShanten = sevenPairsShanten(counts, TILE_MODE);
+    const lglgShanten = liGuLiGuShanten(counts, wildcards);
+    const sncShanten = sixteenNoConnectShanten(counts);
+    const tyShanten = thirteenYiShanten(counts);
+    
+    // 根據mode選擇
+    if (tileMode === 13) {
+        // 13張模式：七對子、十三幺
+        if (spShanten <= minShanten && spShanten <= tyShanten) {
+            if (spShanten === 0) return sevenPairsWaiting(counts);
+        }
+        if (tyShanten <= minShanten && tyShanten <= spShanten) {
+            if (tyShanten === 0) return thirteenYiWaiting(counts);
+        }
+    } else {
+        // 16張模式：嚦咕嚦咕、十三幺、十六不搭 (無七對子)
+        if (lglgShanten <= minShanten && lglgShanten <= spShanten && lglgShanten <= sncShanten && lglgShanten <= tyShanten) {
+            if (lglgShanten === 0) return liGuLiGuWaiting(counts, wildcards);
+            return {};
+        }
+        // 十三幺 before 十六不搭
+        if (tyShanten <= minShanten && tyShanten <= spShanten && tyShanten <= sncShanten) {
+            if (tyShanten === 0) return thirteenYiWaiting(counts);
+            return {};
+        }
+        if (sncShanten === 0 && sncShanten <= minShanten && sncShanten <= tyShanten) {
+            return sixteenNoConnectWaiting(counts);
+        }
+    }
+    
+    // 標準麻雀waiting logic
+    // 如果已經聽牌 (shanten=0)，搵可以completing既牌 (shanten=-1)
+    if (minShanten === 0) {
+        // 如果有wildcards，需要確保有至少一個transformation可以胡牌
+        const totalWildcards = Object.values(wildcards).reduce((a, b) => a + b, 0);
+        
+        for (let i = 0; i < 34; i++) {
+            const currentCount = counts[i];
+            if (currentCount >= 4) continue;
+            
+            const testCounts = [...counts]; // counts is already hand-only
+            testCounts[i]++;
+            
+            // 如果有wildcards，需要檢查所有transformation
+            let canWin = false;
+            
+            if (totalWildcards > 0) {
+                // 檢查每一個transformation
+                for (const dist of generateDistributions(testCounts, wildcards)) {
+                    const testS = quickShanten(dist);
+                    if (testS === -1 && isValidWinningHand(dist)) {
+                        canWin = true;
+                        break;
+                    }
+                }
+            } else {
+                // 冇wildcards，直接check
+                const testS = quickShanten(testCounts);
+                if (testS === -1 && isValidWinningHand(testCounts)) {
+                    canWin = true;
+                }
+            }
+            
+            if (!canWin) continue;
+            
+            const tile = TILES[i];
+            const maxCount = 4 - currentCount;
+            waitingMap[tile] = maxCount;
+        }
+    }
+    // 如果未聽牌 (shanten > 0)，搵可以tenpai既牌 (shanten=0)
+    else if (minShanten > 0) {
+        for (let i = 0; i < 34; i++) {
+            const currentCount = counts[i];
+            if (currentCount >= 4) continue;
+            
+            const testCounts = [...counts]; // counts is already hand-only
+            testCounts[i]++;
+            
+            const minS = getMinShanten(testCounts, wildcards);
+            
+            // 如果 minS = 0 代表tenpai (聽牌)
+            if (minS === 0) {
+                const tile = TILES[i];
+                const maxCount = 4 - currentCount;
+                waitingMap[tile] = maxCount;
+            }
+        }
+    }
+    
+    return waitingMap;
+}
+
+if (command === 'waiting') {
+    const tiles = JSON.parse(args[1]);
+    const expectedTiles = args[2] ? parseInt(args[2]) : 16;  // Default to 16
+    TILE_MODE = args[3] ? parseInt(args[3]) : 16;  // 13 or 16 tile mode
+    const { counts, wildcards } = preprocessTiles(tiles);
+    
+    // 檢查牌數 (放寬到1-17張，單吊都得)
+    const total = tiles.length;
+    if (total < 1 || total > 17) {
+        console.log(JSON.stringify({
+            shanten: -1,
+            waiting: [],
+            error: `牌數需1-17張，目前有${total}張`
+        }));
+        process.exit(0);
+    }
+    
+    // 過多百搭直接報錯
+    const totalWildcards = Object.values(wildcards).reduce((a, b) => a + b, 0);
+    if (totalWildcards > 5) {
+        console.log(JSON.stringify({
+            shanten: -1,
+            waiting: [],
+            error: `百搭數量過多(${totalWildcards}隻)，無法計算`
+        }));
+        process.exit(0);
+    }
+    
+    // 找最小shanten
+    let minShanten = getMinShanten(counts, wildcards, TILE_MODE);
+    const spShanten = sevenPairsShanten(counts, TILE_MODE);
+    const sncShanten = sixteenNoConnectShanten(counts);
+    const tyShanten = thirteenYiShanten(counts);
+    
+    // 如果七對子shanten更好或相同，用七對子既結果
+    if (spShanten <= minShanten) {
+        minShanten = spShanten;
+    }
+    // 如果十六不搭shanten更好，用十六不搭既結果
+    if (sncShanten < minShanten) {
+        minShanten = sncShanten;
+    }
+    // 如果十三幺shanten更好，用十三幺既結果
+    if (tyShanten < minShanten) {
+        minShanten = tyShanten;
+    }
+    
+    // 如果已經胡牌 (shanten = -1)，無需等待
+    if (minShanten === -1) {
+        console.log(JSON.stringify({ shanten: -1, waiting: [] }));
+        process.exit(0);
+    }
+    
+    // 如果已經聽牌(shanten=0)，用之前既邏輯
+    if (minShanten === 0) {
+        // 如果七對子shanten=0，用七對子waiting
+        if (spShanten === 0) {
+            const waitingMap = sevenPairsWaiting(counts);
+            const waiting = Object.keys(waitingMap).map(t => ({
+                tile: t,
+                count: waitingMap[t]
+            }));
+            console.log(JSON.stringify({ shanten: 0, waiting }));
+            process.exit(0);
+        }
+        // 如果十三幺shanten=0，用十三幺waiting
+        if (tyShanten === 0) {
+            const waitingMap = thirteenYiWaiting(counts);
+            const waiting = Object.keys(waitingMap).map(t => ({
+                tile: t,
+                count: waitingMap[t]
+            }));
+            console.log(JSON.stringify({ shanten: 0, waiting }));
+            process.exit(0);
+        }
+        // 標準waiting logic
+        const waitingMap = calculateWaiting(counts, wildcards);
+        const waiting = Object.keys(waitingMap).map(t => ({
+            tile: t,
+            count: waitingMap[t]
+        }));
+        
+        console.log(JSON.stringify({ shanten: 0, waiting }));
+        process.exit(0);
+    }
+    
+    // 如果未聽牌(shanten > 0)，用逐張測試既方法
+    // 測試加入邊張牌可以令shanten變為0
+    // 重要：呢度要考慮wildcard既最佳轉換
+    
+    // 調用嚦咕嚦咕waiting函數
+    const lglgWaiting = liGuLiGuWaiting(counts, wildcards);
+    if (Object.keys(lglgWaiting).length > 0) {
+        const waiting = Object.keys(lglgWaiting).map(t => ({
+            tile: t,
+            count: lglgWaiting[t]
+        }));
+        console.log(JSON.stringify({ shanten: minShanten, waiting }));
+        process.exit(0);
+    }
+    
+    const waitingMap = {};
+    
+    for (let i = 0; i < 34; i++) {
+        // 檢查呢張牌既可用數量
+        const currentCount = counts[i];
+        if (currentCount >= 4) continue; // 最多4張
+        
+        const testCounts = [...counts]; // counts is already hand-only
+        testCounts[i]++;
+        
+        // 如果有wildcards，要試晒所有轉換
+        const totalWildcards = Object.values(wildcards).reduce((a, b) => a + b, 0);
+        let canWin = false;
+        
+        if (totalWildcards > 0) {
+            // 試晒所有wildcard轉換
+            for (const dist of generateDistributions(testCounts, wildcards)) {
+                const s = quickShanten(dist);
+                if (s === -1 && isValidWinningHand(dist)) {
+                    canWin = true;
+                    break;
+                }
+                if (s === 0) {
+                    canWin = true;
+                    break;
+                }
+            }
+        } else {
+            const s = quickShanten(testCounts);
+            if (s === 0) canWin = true;
+        }
+        
+        if (canWin) {
+            const tile = TILES[i];
+            const maxCount = 4 - currentCount;
+            waitingMap[tile] = maxCount;
+        }
+    }
+    
+    const waiting = Object.keys(waitingMap).map(t => ({
+        tile: t,
+        count: waitingMap[t]
+    }));
+    
+    console.log(JSON.stringify({ shanten: minShanten, waiting }));
+}
+
+// ========== 番數計算系統 ==========
+
+// 牌型識別 function
+function identifyPatterns(counts, options = {}) {
+    const { flowers = 0, gang = 0, isZimo = false, isHaidi = false, isHeidi = false, isLian = 0, isZhuang = false } = options;
+    
+    const patterns = {
+        // 顏色類
+        isQingYiSe: false,   // 清一色
+        isHunYiSe: false,    // 混一色
+        isZiYiSe: false,     // 字一色
+        
+        // 門齊類
+        isWuMenQi: false,    // 五門齊 (5門)
+        isLiuMenQi: false,   // 六門齊 (6門)
+        isQiMenQi: false,    // 七門齊 (7門)
+        isDaQiMenQi: false, // 大七門齊
+        isXiaoQiMenQi: false, // 小七門齊
+        isDuanYao: false,   // 斷么
+        isQueYiMen: false,   // 缺一門
+        
+        // 叫牌類型
+        waitingType: null,   // 邊張/中洞/對對碰/獨聽
+        
+        // 刻子類
+        isDuiDuiHu: false,  // 對對胡
+        isSanAnKe: false,    // 三暗刻
+        isSiAnKe: false,    // 四暗刻
+        isKanKanHu: false,   // 坎坎胡
+        isWuAnKe: false,     // 五暗刻
+        
+        // 三元類
+        isDaSanYuan: false, // 大三元
+        isXiaoSanYuan: false, // 小三元
+        
+        // 風牌類
+        hasFengKe: false,   // 有風牌刻子
+        
+        // 花牌類
+        flowerCount: flowers,
+        
+        // 順子類
+        hasYiBanGao: false,   // 一般高 (一組順子數字連續)
+        hasLiangBanGao: false, // 兩般高 (兩組順子數字連續)
+        hasSanBanGao: false,  // 三般高 (三組順子數字連續)
+        hasLaoShao: false,    // 老少 (12/89 順子)
+        hasLaoShaoKe: false,  // 老少刻
+        hasZaLong: false,     // 雜龍 (3門各一組123/456/789)
+        hasQingLong: false,  // 清龍 (同一門123+456+789)
+        
+        // 順子類
+        hasYiBanGao: false, // 一般高
+        hasLiangBanGao: false, // 兩般高
+        hasSanBanGao: false, // 三般高
+        hasLaoShao: false,  // 老少
+        hasLaoShaoKe: false, // 老少刻
+        hasZaLong: false,   // 雜龍
+        hasQingLong: false, // 清龍
+        
+        // 叫牌類
+        waitingType: null,  // 邊張/中洞/獨聽/對對碰
+        
+        // 特殊牌型
+        isQiDuiZi: false,   // 七對子
+        isShiSanYao: false, // 十三幺
+        isShiLiuBuDa: false, // 十六不搭
+        isQiXingBuKao: false, // 七星不靠
+        
+        // 其他
+        hasGang: 0,         // 槓數
+        isMenQianQing: false, // 門前清
+        isDuanYao: false,    // 斷么
+        isJiangYan: false,   // 將眼 (對不再組合內)
+        isWuZiHua: false,    // 無字花 (公開牌無花)
+        
+        // 般高類
+        isYiBanGao: false,    // 一般高 (3番)
+        isLiangBanGao: false, // 雙般高 (移除，PDF無)
+        isSanBanGao: false,   // 三般高 (15番)
+        isSiBanGao: false,    // 四般高 (30番)
+        
+        // 兄弟類
+        isErXiongDi: false,   // 二兄弟 (3番)
+        isXiaoSanXiongDi: false, // 小三兄弟 (10番)
+        isDaSanXiongDi: false, // 大三兄弟 (15番)
+        
+        // 姊妹類
+        isLiangZiMei: false,  // 兩姊妹 (5番)
+        isSanZiMei: false,    // 三姊妹 (8/15番)
+        isDaSanZiMei: false,  // 大三姊妹 (15番)
+        isSiZiMei: false,     // 四姊妹 (30/50番)
+        isWuZiMei: false,     // 五姊妹 (60/90番)
+        isLiuZiMei: false,    // 六姊妹 (160番)
+        
+        // 同款類
+        isTongKuanSanLianDui: false,  // 同款三連對 (5番) - 同一數字各有對
+        isTongKuanSiLianDui: false,    // 同款四連對 (10番)
+        isTongKuanWuLianDui: false,    // 同款五連對 (20番)
+        isTongKuanLiuLianDui: false,    // 同款六連對 (40番)
+        isTongKuanQiLianDui: false,     // 同款七連對 (80番)
+        isErXiangFeng: false,     // 二相逢 (2番) - 同一數字順子跨2花色
+        isSanXiangFeng: false,    // 三相逢 (10番)
+        sanXiangFengCount: 0,  // Count for multiple detection
+        // 四同順 and 五同順 removed
+        
+        // 步高類
+        isSanSeSanBuGao: false,     // 三色三步高 (5/10番)
+        isSanSeSiBuGao: false,      // 三色四步高 (15/20番)
+        isSanSeWuBuGao: false,      // 三色五步高 (30/40番)
+        isYiSeSanBuGao: false,       // 一色三步高 (10/20番)
+        isYiSeSiBuGao: false,        // 一色四步高 (30/40番)
+        isYiSeWuBuGao: false,        // 一色五步高 (60/80番)
+        
+        // 其他特殊牌型
+        isShiLiuBuDa: false,    // 十六不搭 (50番)
+        isShiSanYao: false,     // 十三么 (100/120番)
+        isLiGu: false,           // 嚦咕 (50/60番)
+        isDuDu: false,            // 獨獨 (2番)
+        isQiXingBuKao: false,   // 七星不靠
+        isBuDaSanXiangFeng: false, // 不搭三相逢 (20番)
+        
+        // 混么九類
+        isHunYaoJiu: false,      // 混么九 (60番)
+        isQingYaoJiu: false,    // 清么九 (120番)
+        
+        // 全帶類
+        isQuanDaiYao: false,     // 全帶么 (40番)
+    };
+    
+    // 統計各門既牌數
+    let menCount = 0;
+    let mCount = 0, sCount = 0, pCount = 0, zCount = 0;
+    
+    // 萬 (0-8)
+    for (let i = 0; i < 9; i++) if (counts[i] > 0) mCount++;
+    // 索 (9-17)
+    for (let i = 9; i < 18; i++) if (counts[i] > 0) sCount++;
+    // 筒 (18-26)
+    for (let i = 18; i < 27; i++) if (counts[i] > 0) pCount++;
+    // 字 (27-33)
+    for (let i = 27; i < 34; i++) if (counts[i] > 0) zCount++;
+    
+    if (mCount > 0) menCount++;
+    if (sCount > 0) menCount++;
+    if (pCount > 0) menCount++;
+    if (zCount > 0) menCount++;
+    
+    // 門齊判斷
+    patterns.isWuMenQi = (menCount === 5);
+    patterns.isLiuMenQi = (menCount === 6);
+    patterns.isQiMenQi = (menCount === 7);
+    patterns.isDaQiMenQi = (menCount === 7 && mCount > 0 && sCount > 0 && pCount > 0 && zCount >= 4);
+    patterns.isXiaoQiMenQi = (menCount === 7 && mCount > 0 && sCount > 0 && pCount > 0 && zCount >= 2 && zCount <= 3);
+    
+    // 清一色: 只有一門 (萬/索/筒)，全部牌同一門，無字牌
+    // Count only suits (not honors) for 清一色
+    let suitCount = 0;
+    if (mCount > 0) suitCount++;
+    if (sCount > 0) suitCount++;
+    if (pCount > 0) suitCount++;
+    if (suitCount === 1 && zCount === 0) {
+        if (mCount > 0) patterns.isQingYiSe = true;
+        if (sCount > 0) patterns.isQingYiSe = true;
+        if (pCount > 0) patterns.isQingYiSe = true;
+    }
+    
+    // 字一色: 全部都係字牌 (東南西北中發白)，無數牌
+    if (mCount === 0 && sCount === 0 && pCount === 0 && zCount > 0) {
+        patterns.isZiYiSe = true;
+    }
+    
+    // 混一色: 一門+字牌 (有數牌亦有字牌)
+    if (suitCount === 1 && zCount > 0) {
+        patterns.isHunYiSe = true;
+    }
+    
+    // 注意: 清一色/字一色既唔應該同時有混一色
+    if (patterns.isQingYiSe || patterns.isZiYiSe) patterns.isHunYiSe = false;
+    
+    // 斷么/缺一門
+    // 斷么: 冇1/9 (萬索筒) 同埋字牌
+    // 幺九牌 = 1,9 萬/索/筒 + 所有字牌 (東南西北中發白)
+    let hasYao = false;
+    // 1m,9m (indices 0,8), 1s,9s (indices 9,17), 1p,9p (indices 18,26)
+    if (counts[0] > 0 || counts[8] > 0 || counts[9] > 0 || counts[17] > 0 || 
+        counts[18] > 0 || counts[26] > 0) hasYao = true;
+    // 字牌 (27-33: 東南西北中發白)
+    for (let i = 27; i < 34; i++) if (counts[i] > 0) hasYao = true;
+    patterns.isDuanYao = !hasYao;
+    
+    // 缺一門: 公開牌與手牌只可以有三門中兩門，全副牌不可以有番子
+    // 1. No honor tiles (z)
+    // 2. Total suits (hand + open) = exactly 2
+    let hasHonor = (zCount > 0);
+    
+    // Combined suit count (hand + open)
+    let mExists = false, sExists = false, pExists = false;
+    for (let i = 0; i < 9; i++) if (counts[i] > 0) mExists = true;
+    for (let i = 9; i < 18; i++) if (counts[i] > 0) sExists = true;
+    for (let i = 18; i < 27; i++) if (counts[i] > 0) pExists = true;
+    
+    let totalSuits = (mExists ? 1 : 0) + (sExists ? 1 : 0) + (pExists ? 1 : 0);
+    
+    // Must have exactly 2 suits and no honor tiles
+    patterns.isQueYiMen = !hasHonor && totalSuits === 2;
+    
+    // 門清: 公開牌無碰無上無槓 (即公開牌數量為0)
+    // options.openTileCount passed from Flask
+    if (options.openTileCount === 0) {
+        patterns.isMenQianQing = true;
+    }
+    
+    // 無字花: 公開牌無花牌 (手牌有花牌但公開牌無)
+    // 如果手牌有花牌但open無，就係無字花
+    // 花牌index: 34-41 (0-indexed)
+    let handHasFlower = false;
+    for (let i = 34; i < 42; i++) {
+        if (counts[i] > 0) {
+            handHasFlower = true;
+            break;
+        }
+    }
+    // 花牌檢測 (庭芳)
+    // 花牌: 春夏秋冬(34-37), 梅蘭菊竹(38-41)
+    // 一台花: 1朵花 = 1番
+    // 有花: 有花牌
+    // 正花: 根據風位確定花牌位置
+    // 春夏秋冬為一組(4朵), 梅蘭菊竹為一組(4朵)
+    const seasonTiles = [34, 35, 36, 37];  // 春夏秋冬
+    const flowerTiles = [38, 39, 40, 41];  // 梅蘭菊竹
+    let seasonCount = 0;
+    let flowerCount2 = 0;
+    for (let i = 34; i < 42; i++) {
+        if (counts[i] > 0) {
+            if (i >= 34 && i <= 37) seasonCount++;
+            else flowerCount2++;
+        }
+    }
+    const totalFlower = seasonCount + flowerCount2;
+    
+    // 一台花: 1-8朵花 (1番/朵)
+    if (totalFlower >= 1) {
+        patterns.hasYiTaiHua = true;
+        patterns.flowerCount = totalFlower;
+    }
+    // 有花: 有花牌
+    patterns.isYouHua = (totalFlower >= 1);
+    // 正花: 風位對應的花牌 (需要知道坐位，這裡假設東家)
+    // 東家: 春夏, 南家: 秋冬, 西家: 梅蘭, 北家: 菊竹
+    // 簡化: 正花 = 春夏秋冬齊或梅蘭菊竹齊
+    const isSeasonComplete = seasonTiles.every(i => counts[i] >= 1);
+    const isFlowerComplete = flowerTiles.every(i => counts[i] >= 1);
+    patterns.isZhengHua = isSeasonComplete || isFlowerComplete;
+    
+    if (handHasFlower && options.openTileCount === 0) {
+        patterns.isWuZiHua = true;
+    }
+    
+    // 將眼: 用數字2或5或8既牌做組成一對眼黎胡牌 (萬/條/筒)
+    // 必須係 m/s/p 既 2/5/8，先至算將眼
+    // 字牌 (z) 唔算將眼
+    // If forceJiangYan is set (from meld decomposition), use that
+    if (options.forceJiangYan) {
+        patterns.isJiangYan = true;
+    } else {
+        const jiangYanIndices = [1, 4, 7, 10, 13, 16, 19, 22, 25];  // 2,5,8 in m/s/p
+        for (let i of jiangYanIndices) {
+            // Must be exactly 2 tiles (a pair), not 3 or 4
+            if (options.handCounts[i] === 2) {
+                patterns.isJiangYan = true;
+                break;
+            }
+        }
+    }
+    
+    // 計算刻子數 - 必須係3張相同既牌，唔包含順子
+    // 先移除順子，睇下剩低既牌
+    const c = [...counts];
+    let ponCount = 0;
+    let kanCount = 0;
+    
+    // 移除順子 - 但只處理count<3既牌 (避免移除triplet)
+    // 同時每個位置最多只移除2張 (因為第3張應該留低做刻子)
+    for (let i = 0; i < 27; i++) {
+        if (counts[i] >= 3) continue; // 呢個位置有triplet，唔移除
+        while (c[i] > 0 && c[i+1] > 0 && c[i+2] > 0 && c[i] < 3 && c[i+1] < 3 && c[i+2] < 3) {
+            c[i]--;
+            c[i+1]--;
+            c[i+2]--;
+        }
+    }
+    
+    // 計算剩低既刻子
+    for (let i = 0; i < 34; i++) {
+        if (c[i] >= 4) kanCount++;
+        else if (c[i] >= 3) ponCount++;
+    }
+    
+    // 對對胡: 移除順子後，全部都係刻子 (4+ sets)
+    // 坎坎胡: 5個刻子 + 全部手牌 + 自摸
+    if (ponCount + kanCount >= 4) {
+        patterns.isDuiDuiHu = true;
+        patterns.isSanAnKe = (ponCount + kanCount >= 3);
+        patterns.isSiAnKe = (ponCount + kanCount >= 4);
+        patterns.isKanKanHu = (ponCount + kanCount >= 5);
+        patterns.isWuAnKe = (ponCount + kanCount >= 5);
+    }
+    
+    // 三元牌刻子
+    let zhongCount = counts[31]; // 中
+    let faCount = counts[32];    // 發
+    let baiCount = counts[33];   // 白
+    
+    if (zhongCount >= 3 && faCount >= 3 && baiCount >= 3) {
+        patterns.isDaSanYuan = true;
+    }
+    if ((zhongCount >= 3 && faCount >= 3) || 
+        (zhongCount >= 3 && baiCount >= 3) || 
+        (faCount >= 3 && baiCount >= 3)) {
+        patterns.isXiaoSanYuan = true;
+    }
+    
+    // 風牌刻子
+    for (let i = 27; i < 31; i++) {
+        if (counts[i] >= 3) patterns.hasFengKe = true;
+    }
+    
+    // 箭刻 (中發白刻子)
+    patterns.hasJianKe = (counts[31] >= 3 || counts[32] >= 3 || counts[33] >= 3);
+    
+    // 四歸一: 4張同一隻牌 (5番)
+    // 四歸二: 2 sets 既4張同一隻牌 (10番)
+    // 四歸四: 4張同一隻牌出現在4組順子內
+    // 八歸一: 2 sets of 4 same tiles in 1 seq + 2 pungs
+    // 八歸四: 2 sets of 4 same tiles in 4 seqs
+    // 十二歸一: 3 sets of 4 same tiles in 1 seq + 3 pungs
+    // 十二歸四: 3 sets of 4 same tiles in 4 seqs
+    
+    let siGuiYiCount = 0, siGuiYiMing = 0, siGuiYiAn = 0;
+    let siGuiErCount = 0, siGuiErMing = 0, siGuiErAn = 0;
+    let siGuiSiCount = 0, siGuiSiMing = 0, siGuiSiAn = 0;
+    let baGuiYiCount = 0, baGuiYiMing = 0, baGuiYiAn = 0;
+    let baGuiSiCount = 0, baGuiSiMing = 0, baGuiSiAn = 0;
+    let shiErGuiYiCount = 0, shiErGuiYiMing = 0, shiErGuiYiAn = 0;
+    let shiErGuiSiCount = 0, shiErGuiSiMing = 0, shiErGuiSiAn = 0;
+    
+    for (let i = 0; i < 34; i++) {
+        if (counts[i] === 4) {
+            // Check if this 4-tile group appears in open or hand
+            const openQty = options.openCounts[i];
+            const handQty = options.handCounts[i];
+            const total = openQty + handQty;
+            
+            if (total >= 4) {
+                siGuiYiCount++;
+                if (openQty > 0 && handQty > 0) {
+                    // Mixed - counts as both
+                    siGuiYiMing++;
+                    siGuiYiAn++;
+                } else if (openQty >= 4) {
+                    siGuiYiMing++;
+                } else if (handQty >= 4) {
+                    siGuiYiAn++;
+                }
+            }
+            if (siGuiYiCount >= 2) siGuiErCount++;
+            if (siGuiYiMing >= 2 || (siGuiYiMing >= 1 && siGuiYiAn >= 1)) siGuiErMing++;
+            if (siGuiYiAn >= 2) siGuiErAn++;
+            if (siGuiYiCount >= 4) siGuiSiCount++;
+            if (siGuiYiMing >= 4 || (siGuiYiMing >= 2 && siGuiYiAn >= 2)) siGuiSiMing++;
+            if (siGuiYiAn >= 4) siGuiSiAn++;
+        }
+        if (counts[i] >= 8) {
+            // 八歸: 2 sets of 4
+            const sets = Math.floor(counts[i] / 4);
+            if (sets >= 2) {
+                baGuiYiCount++;
+                // Check location
+                if (options.openCounts[i] >= 4 || options.handCounts[i] >= 4) {
+                    baGuiYiMing++;
+                }
+                if (options.handCounts[i] >= 4) baGuiYiAn++;
+            }
+            if (sets >= 2) baGuiSiCount++;
+            if (sets >= 2) baGuiSiMing++; // Can be in 4 seqs
+        }
+        if (counts[i] >= 12) {
+            // 十二歸: 3 sets of 4
+            const sets = Math.floor(counts[i] / 4);
+            if (sets >= 3) {
+                shiErGuiYiCount++;
+                if (options.openCounts[i] >= 4) shiErGuiYiMing++;
+                if (options.handCounts[i] >= 4) shiErGuiYiAn++;
+            }
+            if (sets >= 3) {
+                shiErGuiSiCount++;
+                shiErGuiSiMing++;
+            }
+        }
+    }
+    
+    patterns.siGuiYiCount = siGuiYiCount;
+    patterns.siGuiYiMingCount = siGuiYiMing;
+    patterns.siGuiYiAnCount = siGuiYiAn;
+    patterns.isSiGuiYi = (siGuiYiCount >= 1);
+    patterns.isSiGuiYiMing = (siGuiYiMing >= 1);
+    patterns.isSiGuiYiAn = (siGuiYiAn >= 1);
+    patterns.isSiGuiEr = (siGuiErCount >= 2);
+    patterns.isSiGuiErMing = (siGuiErMing >= 1);
+    patterns.isSiGuiErAn = (siGuiErAn >= 2);
+    patterns.isSiGuiSi = (siGuiSiCount >= 1);
+    patterns.isSiGuiSiMing = (siGuiSiMing >= 1);
+    patterns.isSiGuiSiAn = (siGuiSiAn >= 1);
+    patterns.isBaGuiYi = (baGuiYiCount >= 1);
+    patterns.isBaGuiYiMing = (baGuiYiMing >= 1);
+    patterns.isBaGuiYiAn = (baGuiYiAn >= 1);
+    patterns.isBaGuiSi = (baGuiSiCount >= 1);
+    patterns.isBaGuiSiMing = (baGuiSiMing >= 1);
+    patterns.isBaGuiSiAn = false; // 八歸四 always counts as 般高, needs checking
+    patterns.isShiErGuiYi = (shiErGuiYiCount >= 1);
+    patterns.isShiErGuiYiMing = (shiErGuiYiMing >= 1);
+    patterns.isShiErGuiYiAn = (shiErGuiYiAn >= 1);
+    patterns.isShiErGuiSi = (shiErGuiSiCount >= 1);
+    patterns.isShiErGuiSiMing = (shiErGuiSiMing >= 1);
+    patterns.isShiErGuiSiAn = false;
+    
+    // ===== 順子檢測 =====
+    // 檢測順子組合 (不計花色)
+    const sequences = [];
+    
+    // 萬 (0-8)
+    for (let i = 0; i < 7; i++) {
+        if (counts[i] > 0 && counts[i+1] > 0 && counts[i+2] > 0) {
+            sequences.push({ suit: 'm', start: i });
+        }
+    }
+    // 索 (9-17)
+    for (let i = 9; i < 16; i++) {
+        if (counts[i] > 0 && counts[i+1] > 0 && counts[i+2] > 0) {
+            sequences.push({ suit: 's', start: i-9 });
+        }
+    }
+    // 筒 (18-26)
+    for (let i = 18; i < 25; i++) {
+        if (counts[i] > 0 && counts[i+1] > 0 && counts[i+2] > 0) {
+            sequences.push({ suit: 'p', start: i-18 });
+        }
+    }
+    
+    // 一般高/兩般高/三般高
+    // 檢查有冇連續既sequence
+    const seqStarts = sequences.map(s => s.start);
+    for (let i = 0; i < seqStarts.length; i++) {
+        if (seqStarts.includes(i) && seqStarts.includes(i+1)) patterns.hasYiBanGao = true;
+        if (seqStarts.includes(i) && seqStarts.includes(i+1) && seqStarts.includes(i+2)) patterns.hasSanBanGao = true;
+    }
+    // 兩般高
+    let banGaoCount = 0;
+    for (let i = 0; i < 7; i++) {
+        if (seqStarts.includes(i) && seqStarts.includes(i+1)) banGaoCount++;
+    }
+    if (banGaoCount >= 2) patterns.hasLiangBanGao = true;
+    
+    // 老少 (定義): 
+    // 老少順: 同一花色有123 + 789 既順子
+    // 老少碰: 同一花色有111 + 999 既刻子
+    
+    // 萬牌
+    let hasLaoShao123 = counts[0] >= 1 && counts[1] >= 1 && counts[2] >= 1;
+    let hasLaoShao789 = counts[6] >= 1 && counts[7] >= 1 && counts[8] >= 1;
+    let hasLaoShao111 = counts[0] >= 3;
+    let hasLaoShao999 = counts[8] >= 3;
+    if ((hasLaoShao123 && hasLaoShao789) || (hasLaoShao111 && hasLaoShao999)) {
+        patterns.hasLaoShao = true;
+    }
+    // 索牌
+    hasLaoShao123 = counts[9] >= 1 && counts[10] >= 1 && counts[11] >= 1;
+    hasLaoShao789 = counts[15] >= 1 && counts[16] >= 1 && counts[17] >= 1;
+    hasLaoShao111 = counts[9] >= 3;
+    hasLaoShao999 = counts[17] >= 3;
+    if ((hasLaoShao123 && hasLaoShao789) || (hasLaoShao111 && hasLaoShao999)) {
+        patterns.hasLaoShao = true;
+    }
+    // 筒牌
+    hasLaoShao123 = counts[18] >= 1 && counts[19] >= 1 && counts[20] >= 1;
+    hasLaoShao789 = counts[24] >= 1 && counts[25] >= 1 && counts[26] >= 1;
+    hasLaoShao111 = counts[18] >= 3;
+    hasLaoShao999 = counts[26] >= 3;
+    if ((hasLaoShao123 && hasLaoShao789) || (hasLaoShao111 && hasLaoShao999)) {
+        patterns.hasLaoShao = true;
+    }
+    
+    // 三色三步高: 需要3門各有不同既sequence (e.g., 123m + 456s + 789p)
+    // 即一門有123，另一門有456，另一門有789
+    let zaLongCount = 0;
+    let zaLongMing = false;
+    let zaLongAn = false;
+    
+    // Check if each suit has different sequences
+    const suitHas = [[], [], []];  // For each suit, track which sequences it has (0=123, 1=456, 2=789)
+    for (let suit = 0; suit < 3; suit++) {
+        const suitStart = suit * 9;
+        const has123 = counts[suitStart] >= 1 && counts[suitStart+1] >= 1 && counts[suitStart+2] >= 1;
+        const has456 = counts[suitStart+3] >= 1 && counts[suitStart+4] >= 1 && counts[suitStart+5] >= 1;
+        const has789 = counts[suitStart+6] >= 1 && counts[suitStart+7] >= 1 && counts[suitStart+8] >= 1;
+        
+        if (has123) suitHas[suit].push(0);
+        if (has456) suitHas[suit].push(1);
+        if (has789) suitHas[suit].push(2);
+    }
+    
+    // Check if we have 3 different sequences across 3 suits
+    const allSeqs = [];
+    for (let suit = 0; suit < 3; suit++) {
+        for (let seq of suitHas[suit]) {
+            if (!allSeqs.includes(seq)) allSeqs.push(seq);
+        }
+    }
+    
+    // Need 3 different sequences (0,1,2) across the suits
+    if (allSeqs.length >= 3) {
+        zaLongCount = 3;
+        // Check location
+        for (let suit = 0; suit < 3; suit++) {
+            const suitStart = suit * 9;
+            for (let seq of suitHas[suit]) {
+                const baseIdx = suitStart + seq * 3;
+                if (options.openCounts[baseIdx] > 0 || options.openCounts[baseIdx+1] > 0 || options.openCounts[baseIdx+2] > 0) {
+                    zaLongMing = true;
+                }
+                if (options.handCounts[baseIdx] > 0 || options.handCounts[baseIdx+1] > 0 || options.handCounts[baseIdx+2] > 0) {
+                    zaLongAn = true;
+                }
+            }
+        }
+    }
+    
+    // 雜龍: 3門各有不同sequence
+    if (zaLongCount >= 3) {
+        patterns.hasZaLong = true;
+        patterns.zaLongCount = zaLongCount;
+        // Also set 三色三步高 明/暗 - if ANY open, it's 明
+        if (zaLongMing && !zaLongAn) {
+            patterns.isSanSeSanBuGaoMing = true;
+        } else if (zaLongAn && !zaLongMing) {
+            patterns.isSanSeSanBuGaoAn = true;
+        } else if (zaLongMing && zaLongAn) {
+            patterns.isSanSeSanBuGaoMing = true;  // Mixed - treat as 明
+        }
+    }
+    
+    // 清龍: 同一門123+456+789 (需要每個start都有)
+    const mSeq = sequences.filter(s => s.suit === 'm').map(s => s.start);
+    const sSeq = sequences.filter(s => s.suit === 's').map(s => s.start);
+    const pSeq = sequences.filter(s => s.suit === 'p').map(s => s.start);
+    
+    if ((mSeq.includes(0) && mSeq.includes(3) && mSeq.includes(6)) ||
+        (sSeq.includes(0) && sSeq.includes(3) && sSeq.includes(6)) ||
+        (pSeq.includes(0) && pSeq.includes(3) && pSeq.includes(6))) {
+        patterns.hasQingLong = true;
+    }
+    
+    // ===== 特殊牌型檢測 =====
+    
+    // 七對子: 7對牌 (14張) - 只適用於13張模式
+    let pairCount = 0;
+    let totalTiles = 0;
+    for (let i = 0; i < 34; i++) {
+        totalTiles += counts[i];
+        if (counts[i] >= 2) pairCount += Math.floor(counts[i] / 2);
+    }
+    // 七對子 = 13張模式 (14張 = 7對)
+    if (pairCount >= 7 && totalTiles === 14) {
+        patterns.isQiDuiZi = true;
+    }
+    
+    // 嚦咕嚦咕: 7對 + 1坎 (碰) = 17張 - 16張模式
+    // 參考 mahjong-tilefficiency: 坎也算1對
+    let liGuPairs = 0;
+    let hasTriplet = false;
+    for (let i = 0; i < 34; i++) {
+        if (counts[i] === 2) {
+            liGuPairs++;           // 對 = 1 pair
+        } else if (counts[i] === 3) {
+            liGuPairs++;           // 坎 = 1 pair
+            hasTriplet = true;
+        } else if (counts[i] === 4) {
+            liGuPairs += 2;        // 4張 = 2 pairs
+        }
+    }
+    // 嚦咕嚦咕 = 7對 + 1坎 (共17張)
+    if (liGuPairs >= 7 && hasTriplet && totalTiles === 17) {
+        patterns.isLiGu = true;
+    }
+    
+    // 十三幺: 1,9 萬索筒 + 字牌 (13張) + 任何一張湊對
+    const orphans = [0,8, 9,17, 18,26, 27,28,29,30,31,32,33]; // 1,9m/s/p + 字
+    let orphanCount = 0;
+    for (const idx of orphans) {
+        if (counts[idx] > 0) orphanCount++;
+    }
+    if (orphanCount >= 13) {
+        patterns.isShiSanYao = true;
+    }
+    
+    // 十六不搭: 7張字牌 + 3張數牌 (非連續)
+    // 呢個比較複雜，需要更強既檢測
+    
+    // 七星不靠: 7隻字牌 (東南西北中發白)
+    let ziCount = 0;
+    for (let i = 27; i < 34; i++) {
+        if (counts[i] > 0) ziCount++;
+    }
+    if (ziCount >= 7) {
+        patterns.isQiXingBuKao = true;
+    }
+    
+    // ===== 般高類檢測 (PDF定義) =====
+    // 一般高: 兩個「相同」的順子 (如 345m + 345m，每張牌2張)
+    // 三般高: 三個「相同」的順子 (每張牌3張)
+    // 四般高: 四個「相同」的順子 (每張牌4張)
+    
+    // 般高: 計算有幾多組「相同既順子」
+    let yiBanGaoCount = 0;
+    let sanBanGaoCount = 0;
+    
+    // 萬牌 - 檢查每個位置 (2套=2張, 3套=3張, 4套=4張)
+    for (let i = 0; i < 7; i++) {
+        // 一般高: 需要每張牌有2張或以上 (2套完整順子)
+        if (counts[i] >= 2 && counts[i+1] >= 2 && counts[i+2] >= 2) {
+            yiBanGaoCount++;
+        }
+        // 三般高: 需要每張牌有3張或以上 (3套完整順子)
+        if (counts[i] >= 3 && counts[i+1] >= 3 && counts[i+2] >= 3) {
+            sanBanGaoCount++;
+        }
+    }
+    // 索牌
+    for (let i = 9; i < 16; i++) {
+        if (counts[i] >= 2 && counts[i+1] >= 2 && counts[i+2] >= 2) {
+            yiBanGaoCount++;
+        }
+        if (counts[i] >= 3 && counts[i+1] >= 3 && counts[i+2] >= 3) {
+            sanBanGaoCount++;
+        }
+    }
+    // 筒牌
+    for (let i = 18; i < 25; i++) {
+        if (counts[i] >= 2 && counts[i+1] >= 2 && counts[i+2] >= 2) {
+            yiBanGaoCount++;
+        }
+        if (counts[i] >= 3 && counts[i+1] >= 3 && counts[i+2] >= 3) {
+            sanBanGaoCount++;
+        }
+    }
+    
+    if (yiBanGaoCount >= 1) patterns.isYiBanGao = true;
+    if (sanBanGaoCount >= 1) patterns.isSanBanGao = true;
+    
+    // ===== 步高類檢測 (PDF定義) =====
+    // 一色三步高 = 清龍: 同一門有123+456+789 (遞增3)
+    
+    // ===== 步高類 明/暗檢測 =====
+    // 步高 = 遞增1的連續順子 (如 123+234+345)
+    // 二步高 = 遞增2的連續順子 (如 123+345+567)
+    // 三步高/雜龍 = 遞增3的連續順子 (如 123+456+789)
+    
+    // Helper: 檢查某花色某位置是否有順子 (需要count >= 1 for each tile)
+    function hasSeqInSuit(counts, suitStart, startIdx, step) {
+        // step=1: 123,234,345; step=2: 123,345,567; step=3: 123,456,789
+        for (let k = 0; k < 3; k++) {
+            const idx = suitStart + startIdx + k * step;
+            if (idx > suitStart + 8 || idx + 2 > suitStart + 8) return false;
+            if (counts[idx] < 1 || counts[idx+1] < 1 || counts[idx+2] < 1) return false;
+        }
+        return true;
+    }
+    
+    // Helper: 檢查順子是否在公開牌區域 (明) 或 手牌 (暗)
+    function getSeqLocation(counts, options, suitStart, startIdx, step) {
+        // 模拟顺子需要的牌
+        let inOpen = 0, inHand = 0;
+        for (let k = 0; k < 3; k++) {
+            const idx = suitStart + startIdx + k * step;
+            const need = 1;
+            inOpen += Math.min(options.openCounts[idx], need);
+            inHand += Math.min(options.handCounts[idx], need);
+        }
+        return { inOpen, inHand };
+    }
+    
+    // 一色步步高: 9張牌 X(a),X+1(b),X+2(c),X+1(d),X+2(e),X+3(f),X+2(g),X+3(h),X+4(i)
+    // 需要: X:1, X+1:2, X+2:3, X+3:2, X+4:1
+    let yiSeBuBuGaoMing = 0, yiSeBuBuGaoAn = 0;
+    for (let suit = 0; suit < 3; suit++) {
+        const suitStart = suit * 9;
+        for (let X = 0; X <= 4; X++) {
+            if (counts[suitStart + X] >= 1 &&
+                counts[suitStart + X + 1] >= 2 &&
+                counts[suitStart + X + 2] >= 3 &&
+                counts[suitStart + X + 3] >= 2 &&
+                counts[suitStart + X + 4] >= 1) {
+                let hasOpen = false;
+                for (let j = X; j <= X + 4; j++) {
+                    if (options.openCounts[suitStart + j] > 0) {
+                        hasOpen = true;
+                        break;
+                    }
+                }
+                if (hasOpen) yiSeBuBuGaoMing++;
+                else yiSeBuBuGaoAn++;
+            }
+        }
+    }
+    patterns.isYiSeBuBuGaoMing = (yiSeBuBuGaoMing >= 1);
+    patterns.isYiSeBuBuGaoAn = (yiSeBuBuGaoAn >= 1);
+    
+    // 一色二步高: 9張牌 X(a),X+1(b),X+2(c),X+2(d),X+3(e),X+4(f),X+4(g),X+5(h),X+6(i)
+    // 需要: X:1, X+1:1, X+2:2, X+3:1, X+4:2, X+5:1, X+6:1
+    let yiSeErBuGaoMing = 0, yiSeErBuGaoAn = 0;
+    for (let suit = 0; suit < 3; suit++) {
+        const suitStart = suit * 9;
+        for (let X = 0; X <= 2; X++) {
+            if (counts[suitStart + X] >= 1 &&
+                counts[suitStart + X + 1] >= 1 &&
+                counts[suitStart + X + 2] >= 2 &&
+                counts[suitStart + X + 3] >= 1 &&
+                counts[suitStart + X + 4] >= 2 &&
+                counts[suitStart + X + 5] >= 1 &&
+                counts[suitStart + X + 6] >= 1) {
+                let hasOpen = false;
+                for (let j = X; j <= X + 6; j++) {
+                    if (options.openCounts[suitStart + j] > 0) {
+                        hasOpen = true;
+                        break;
+                    }
+                }
+                if (hasOpen) yiSeErBuGaoMing++;
+                else yiSeErBuGaoAn++;
+            }
+        }
+    }
+    patterns.isYiSeErBuGaoMing = (yiSeErBuGaoMing >= 1);
+    patterns.isYiSeErBuGaoAn = (yiSeErBuGaoAn >= 1);
+    
+    // 一色三步高: 需要123+456+789 (step=3, 3個非連續順子)
+    // 明/暗: 如果有任何一張在公開牌，則為明
+    let yiSeSanBuGaoMing = 0, yiSeSanBuGaoAn = 0;
+    for (let suit = 0; suit < 3; suit++) {
+        const suitStart = suit * 9;
+        if (hasSeqInSuit(counts, suitStart, 0, 3)) {
+            // Check if any of the 9 tiles are in open
+            let hasOpen = false;
+            let hasHand = false;
+            for (let j = 0; j < 9; j++) {
+                if (options.openCounts && options.openCounts[suitStart + j] > 0) {
+                    hasOpen = true;
+                } else if (counts[suitStart + j] > 0) {
+                    hasHand = true;
+                }
+            }
+            if (hasOpen && !hasHand) {
+                yiSeSanBuGaoMing++;
+            } else if (!hasOpen && hasHand) {
+                yiSeSanBuGaoAn++;
+            } else if (hasOpen && hasHand) {
+                // Mixed - treat as 明 (any open makes it 明)
+                yiSeSanBuGaoMing++;
+            }
+        }
+    }
+    patterns.isYiSeSanBuGaoMing = (yiSeSanBuGaoMing >= 1);
+    patterns.isYiSeSanBuGaoAn = (yiSeSanBuGaoAn >= 1);
+    
+    // 一色四步高 (step=4)
+    let yiSeSiBuGaoMing = 0, yiSeSiBuGaoAn = 0;
+    for (let suit = 0; suit < 3; suit++) {
+        const suitStart = suit * 9;
+        for (let i = 0; i <= 2; i++) {
+            if (hasSeqInSuit(counts, suitStart, i, 4)) {
+                const loc = getSeqLocation(counts, options, suitStart, i, 4);
+                if (loc.inOpen > 0) yiSeSiBuGaoMing++;
+                if (loc.inHand > 0) yiSeSiBuGaoAn++;
+            }
+        }
+    }
+    patterns.isYiSeSiBuGaoMing = (yiSeSiBuGaoMing >= 1);
+    patterns.isYiSeSiBuGaoAn = (yiSeSiBuGaoAn >= 1);
+    
+    // 一色五步高 (step=5)
+    let yiSeWuBuGaoMing = 0, yiSeWuBuGaoAn = 0;
+    for (let suit = 0; suit < 3; suit++) {
+        const suitStart = suit * 9;
+        for (let i = 0; i <= 1; i++) {
+            if (hasSeqInSuit(counts, suitStart, i, 5)) {
+                const loc = getSeqLocation(counts, options, suitStart, i, 5);
+                if (loc.inOpen > 0) yiSeWuBuGaoMing++;
+                if (loc.inHand > 0) yiSeWuBuGaoAn++;
+            }
+        }
+    }
+    patterns.isYiSeWuBuGaoMing = (yiSeWuBuGaoMing >= 1);
+    patterns.isYiSeWuBuGaoAn = (yiSeWuBuGaoAn >= 1);
+    
+    // 三色步步高: 3門各有遞進sequence (如123m+234s+345p)，花色順序不限
+    let sanSeBuBuGaoMing = 0, sanSeBuBuGaoAn = 0;
+    // Only progressive pattern (starts at i, i+1, i+2) is correct for 三色步步高: 3 different suits with starts at (i, i+1, i+2)
+    // This catches patterns like 123m + 234s + 345p or 234m + 345s + 456p
+    let allSeqs2 = [];
+    for (let suit = 0; suit < 3; suit++) {
+        const suitStart = 9 * suit;
+        for (let start = 0; start <= 6; start++) {
+            if (counts[suitStart+start] >= 1 && counts[suitStart+start+1] >= 1 && counts[suitStart+start+2] >= 1) {
+                allSeqs2.push({suit, start});
+            }
+        }
+    }
+    // Try all combos of 3 sequences from different suits
+    let foundBuBuGao = {m: new Set(), a: new Set()};  // Track found combos to avoid duplicates
+    for (let a = 0; a < allSeqs2.length; a++) {
+        for (let b = a+1; b < allSeqs2.length; b++) {
+            for (let c = b+1; c < allSeqs2.length; c++) {
+                let s = [allSeqs2[a], allSeqs2[b], allSeqs2[c]];
+                // Check if all 3 suits are different
+                if (s[0].suit === s[1].suit || s[0].suit === s[2].suit || s[1].suit === s[2].suit) continue;
+                // Check if starts are progressive
+                let starts = s.map(x => x.start).sort((x,y) => x-y);
+                if (starts[1] === starts[0] + 1 && starts[2] === starts[1] + 1) {
+                    // Found progressive pattern
+                    let hasOpen = false, hasHand = false;
+                    for (let seq of s) {
+                        const suitStart = 9 * seq.suit;
+                        if (options.openCounts[suitStart+seq.start] > 0 || options.openCounts[suitStart+seq.start+1] > 0 || options.openCounts[suitStart+seq.start+2] > 0) hasOpen = true;
+                        if (options.handCounts[suitStart+seq.start] > 0 || options.handCounts[suitStart+seq.start+1] > 0 || options.handCounts[suitStart+seq.start+2] > 0) hasHand = true;
+                    }
+                    if (hasOpen) {
+                        if (!foundBuBuGao.m.has(starts[0])) {
+                            sanSeBuBuGaoMing++;
+                            foundBuBuGao.m.add(starts[0]);
+                        }
+                    } else if (hasHand) {
+                        if (!foundBuBuGao.a.has(starts[0])) {
+                            sanSeBuBuGaoAn++;
+                            foundBuBuGao.a.add(starts[0]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    patterns.isSanSeBuBuGaoMing = (sanSeBuBuGaoMing >= 1);
+    patterns.isSanSeBuBuGaoAn = (sanSeBuBuGaoAn >= 1);
+    patterns.sanSeBuBuGaoMingCount = sanSeBuBuGaoMing;
+    patterns.sanSeBuBuGaoAnCount = sanSeBuBuGaoAn;
+    
+    // 三色二步高: 3門各一組sequence (如123+345+567)，花色順序不限，step=2
+    // Need sequences at steps 0,2,4 in 3 DIFFERENT suits
+    let sanSeErBuGaoMing = 0, sanSeErBuGaoAn = 0;
+    
+    // Find all sequences at steps 0, 2, 4 across all suits
+    let allSeqsAtSteps = {0: [], 2: [], 4: []};
+    for (let step of [0, 2, 4]) {
+        for (let suit = 0; suit < 3; suit++) {
+            const suitStart = 9 * suit;
+            // Check if this suit has sequence at this step
+            if (counts[suitStart+step] >= 1 && counts[suitStart+step+1] >= 1 && counts[suitStart+step+2] >= 1) {
+                // Check if in open or hand
+                let inOpen = false, inHand = false;
+                if (options.openCounts[suitStart+step] > 0 || options.openCounts[suitStart+step+1] > 0 || options.openCounts[suitStart+step+2] > 0) inOpen = true;
+                if (options.handCounts[suitStart+step] > 0 || options.handCounts[suitStart+step+1] > 0 || options.handCounts[suitStart+step+2] > 0) inHand = true;
+                allSeqsAtSteps[step].push({suit, step, inOpen, inHand});
+            }
+        }
+    }
+    
+    // Try to find 3 different suits covering steps 0, 2, 4
+    for (let s0 of allSeqsAtSteps[0]) {
+        for (let s2 of allSeqsAtSteps[2]) {
+            for (let s4 of allSeqsAtSteps[4]) {
+                // Must be 3 different suits
+                let suits = [s0.suit, s2.suit, s4.suit];
+                if (suits[0] === suits[1] || suits[0] === suits[2] || suits[1] === suits[2]) continue;
+                
+                // Check if any are in open
+                let hasOpen = s0.inOpen || s2.inOpen || s4.inOpen;
+                if (hasOpen) sanSeErBuGaoMing++;
+                else sanSeErBuGaoAn++;
+            }
+        }
+    }
+    patterns.isSanSeErBuGaoMing = (sanSeErBuGaoMing >= 1);
+    patterns.isSanSeErBuGaoAn = (sanSeErBuGaoAn >= 1);
+    
+    // 三色二步高遞進: 3門start位置為 progressive (如123m+345s+567p 或 234m+456s+678p)
+    let peEr = [[],[],[]];
+    for (let suit = 0; suit < 3; suit++) {
+        const ss = 9 * suit;
+        for (let st = 0; st <= 6; st++) {
+            if (counts[ss+st] >= 1 && counts[ss+st+1] >= 1 && counts[ss+st+2] >= 1) {
+                peEr[suit].push(st);
+            }
+        }
+    }
+    // Try all start positions: (0,2,4) and (1,3,5)
+    for (let baseStart = 0; baseStart <= 1; baseStart++) {
+        if (peEr[0].includes(baseStart) && peEr[1].includes(baseStart+2) && peEr[2].includes(baseStart+4)) {
+            let ho = false, hh = false;
+            const chk = (s, st) => { const sss = 9*s; if (options.openCounts[sss+st]>0||options.openCounts[sss+st+1]>0||options.openCounts[sss+st+2]>0) ho=true; if (options.handCounts[sss+st]>0||options.handCounts[sss+st+1]>0||options.handCounts[sss+st+2]>0) hh=true; };
+            chk(0,baseStart); chk(1,baseStart+2); chk(2,baseStart+4);
+            if (ho) sanSeErBuGaoMing++; else if (hh) sanSeErBuGaoAn++;
+        }
+    }
+    patterns.isSanSeErBuGaoMing = (sanSeErBuGaoMing >= 1);
+    patterns.isSanSeErBuGaoAn = (sanSeErBuGaoAn >= 1);
+    patterns.sanSeErBuGaoMingCount = sanSeErBuGaoMing;
+    patterns.sanSeErBuGaoAnCount = sanSeErBuGaoAn;
+    
+    // 三色三步高/雜龍 - detected in 雜龍 section above
+    
+    // 三色四步高 (3 suits, step=4)
+    let sanSeSiBuGaoMing = 0, sanSeSiBuGaoAn = 0;
+    for (let i = 0; i <= 2; i++) {
+        let hasAll3 = true;
+        let hasOpen = false, hasHand = false;
+        for (let suit = 0; suit < 3; suit++) {
+            const suitStart = suit * 9;
+            if (counts[suitStart+i] < 1 || counts[suitStart+i+4] < 1 || counts[suitStart+i+8] < 1) {
+                hasAll3 = false; break;
+            }
+            const openHas = Math.min(options.openCounts[suitStart+i],1) + Math.min(options.openCounts[suitStart+i+4],1) + Math.min(options.openCounts[suitStart+i+8],1);
+            const handHas = Math.min(options.handCounts[suitStart+i],1) + Math.min(options.handCounts[suitStart+i+4],1) + Math.min(options.handCounts[suitStart+i+8],1);
+            if (openHas > 0) hasOpen = true;
+            if (handHas > 0) hasHand = true;
+        }
+        if (hasAll3) {
+            if (hasOpen) sanSeSiBuGaoMing++;
+            if (hasHand) sanSeSiBuGaoAn++;
+        }
+    }
+    patterns.isSanSeSiBuGaoMing = (sanSeSiBuGaoMing >= 1);
+    patterns.isSanSeSiBuGaoAn = (sanSeSiBuGaoAn >= 1);
+    
+    // 三色五步高 (3 suits, step=5)
+    let sanSeWuBuGaoMing = 0, sanSeWuBuGaoAn = 0;
+    for (let i = 0; i <= 1; i++) {
+        let hasAll3 = true;
+        let hasOpen = false, hasHand = false;
+        for (let suit = 0; suit < 3; suit++) {
+            const suitStart = suit * 9;
+            if (counts[suitStart+i] < 1 || counts[suitStart+i+5] < 1 || counts[suitStart+i+10] < 1 || counts[suitStart+i+10] > 8) {
+                hasAll3 = false; break;
+            }
+            if (suitStart+i+10 > 26) { hasAll3 = false; break; }
+            const openHas = Math.min(options.openCounts[suitStart+i],1) + Math.min(options.openCounts[suitStart+i+5],1) + Math.min(options.openCounts[suitStart+i+10],1);
+            const handHas = Math.min(options.handCounts[suitStart+i],1) + Math.min(options.handCounts[suitStart+i+5],1) + Math.min(options.handCounts[suitStart+i+10],1);
+            if (openHas > 0) hasOpen = true;
+            if (handHas > 0) hasHand = true;
+        }
+        if (hasAll3) {
+            if (hasOpen) sanSeWuBuGaoMing++;
+            if (hasHand) sanSeWuBuGaoAn++;
+        }
+    }
+    patterns.isSanSeWuBuGaoMing = (sanSeWuBuGaoMing >= 1);
+    patterns.isSanSeWuBuGaoAn = (sanSeWuBuGaoAn >= 1);
+    
+    // ===== 不搭三相逢 =====
+    let buDaCount = 0;
+    for (let suit = 0; suit < 3; suit++) {
+        const base = suit * 9;
+        if ((counts[base] > 0 && counts[base+3] > 0 && counts[base+6] > 0) ||
+            (counts[base+1] > 0 && counts[base+4] > 0 && counts[base+7] > 0) ||
+            (counts[base+2] > 0 && counts[base+5] > 0 && counts[base+8] > 0)) {
+            buDaCount++;
+        }
+    }
+    if (buDaCount >= 3) patterns.isBuDaSanXiangFeng = true;
+    
+    // ===== 兄弟類檢測 (PDF定義: 相同數字但不同花色既刻子) =====
+    // 二兄弟: 2個刻子跨2個花色 (如 111m + 111s) - 注意：需要2個刻子，不是1刻+1對
+    // 小三兄弟: 2個刻子跨2個花色 + 1個對子 (如 111m + 111s + 11p)
+    // 大三兄弟: 3個刻子跨3個花色 (如 111m + 111s + 111p)
+    
+    // 檢查每個數字：有幾多個花色有刻子
+    let maxXiongDiPongs = 0;
+    let hasXiongDiPair = false;
+    
+    for (let num = 0; num < 9; num++) {
+        const m = counts[num];      // 萬
+        const s = counts[9 + num];  // 索
+        const p = counts[18 + num]; // 筒
+        
+        // 呢個數字跨幾多個花色有刻子
+        let suitsWithPong = 0;
+        if (m >= 3) suitsWithPong++;
+        if (s >= 3) suitsWithPong++;
+        if (p >= 3) suitsWithPong++;
+        
+        // 呢個數字跨幾多個花色有對子 (但唔計已經有刻子既)
+        let suitsWithPair = 0;
+        if (m >= 2 && m < 3) suitsWithPair++;
+        if (s >= 2 && s < 3) suitsWithPair++;
+        if (p >= 2 && p < 3) suitsWithPair++;
+        
+        // 記錄最大既兄弟數 (用黎判斷大三兄弟)
+        if (suitsWithPong > maxXiongDiPongs) {
+            maxXiongDiPongs = suitsWithPong;
+        }
+        
+        // 小三兄弟: 同一數字有2個刻子 + 1對
+        if (suitsWithPong >= 2 && suitsWithPair >= 1) {
+            patterns.isXiaoSanXiongDi = true;
+        }
+        // 二兄弟: 同一數字有2個刻子跨2個花色
+        if (suitsWithPong >= 2) {
+            patterns.isErXiongDi = true;
+        }
+    }
+    
+    // 大三兄弟: 需要同一個數字跨3個花色都有刻子
+    if (maxXiongDiPongs >= 3) {
+        patterns.isDaSanXiongDi = true;
+    }
+    
+    // ===== 姊妹類檢測 (同款數字遞增既刻子) =====
+    // 兩姊妹: 2組同款數字遞增既刻子 (如 111m + 222m)
+    // 大三姊妹: 3組遞增刻子 (如 111m + 222m + 333m) 或 同一數字跨3個花色
+    // 三姊妹: 3組遞增刻子
+    // 四五六姊妹以此類推
+    
+    // 計算每個數字(1-9)既刻子數跨幾多個花色
+    let sisterGroupsByNumber = [0,0,0,0,0,0,0,0,0]; // 1-9
+    for (let num = 1; num <= 9; num++) {
+        let suitCount = 0;
+        for (let suit = 0; suit < 3; suit++) {
+            const idx = suit * 9 + (num - 1);
+            if (counts[idx] >= 3) {
+                suitCount++;
+            }
+        }
+        sisterGroupsByNumber[num-1] = suitCount;
+    }
+    
+    // 大三姊妹: 同一數字既刻子跨3個花色 (如 111m + 111s + 111p)
+    let daSanZiMeiCount = sisterGroupsByNumber.filter(s => s === 3).length;
+    
+    // 計算遞增既刻子組合
+    // 例如 111+222+333 應該計為3組 (111+222, 222+333, 111+222+333)
+    let sisterPongCount = 0;
+    for (let suit = 0; suit < 3; suit++) {
+        const base = suit * 9;
+        // 搵出呢個花色入面所有既刻子位置
+        let pongPositions = [];
+        for (let i = 0; i < 9; i++) {
+            if (counts[base+i] >= 3) {
+                pongPositions.push(i);
+            }
+        }
+        // 計算相連既刻子組合數
+        for (let i = 0; i < pongPositions.length; i++) {
+            for (let j = i; j < pongPositions.length; j++) {
+                // 連續既話就計
+                if (pongPositions[j] - pongPositions[i] === j - i) {
+                    sisterPongCount++;
+                }
+            }
+        }
+    }
+    
+    // 計算跨花色既姊妹 (2組以上)
+    let liangZiMeiCount = sisterGroupsByNumber.filter(s => s === 2).length;
+    
+    // 大三姊妹優先: 3組遞增刻子 或者 同一數字跨3花色
+    if (sisterPongCount >= 3 || daSanZiMeiCount >= 1) {
+        patterns.isDaSanZiMei = true;
+    } else if (sisterPongCount >= 6) {
+        patterns.isLiuZiMei = true;
+    } else if (sisterPongCount >= 5) {
+        patterns.isWuZiMei = true;
+    } else if (sisterPongCount >= 4) {
+        patterns.isSiZiMei = true;
+    } else if (sisterPongCount >= 3) {
+        patterns.isSanZiMei = true;
+    } else if (liangZiMeiCount >= 1 || sisterPongCount >= 2) {
+        patterns.isLiangZiMei = true;
+    }
+    
+    // ===== 相逢類檢測 (PDF定義) =====
+    // 二相逢: 同一數字既順子跨2個花色 (如 123m + 123s)
+    // 三相逢: 同一數字既順子跨3個花色 (如 123m + 123s + 123p)
+    // 每個花色既count可以直接加埋 (因為每張牌都可以分開用)
+    let sanXiangFengTotal = 0;
+    let erXiangFengTotal = 0;
+    for (let num = 0; num <= 6; num++) {
+        const m = num;
+        const s = 9 + num;
+        const p = 18 + num;
+        
+        // 呢個position有幾多個sequence可以用
+        const mSeq = counts[m] > 0 && counts[m+1] > 0 && counts[m+2] > 0 ? 1 : 0;
+        const sSeq = counts[s] > 0 && counts[s+1] > 0 && counts[s+2] > 0 ? 1 : 0;
+        const pSeq = counts[p] > 0 && counts[p+1] > 0 && counts[p+2] > 0 ? 1 : 0;
+        
+        // 如果3門都有sequence，三相逢數量 = 最多果個花色既count
+        if (mSeq && sSeq && pSeq) {
+            // 例如: 123m x2 + 123s x1 + 123p x1 = 2個三相逢
+            const maxCount = Math.max(counts[m], counts[s], counts[p]);
+            sanXiangFengTotal += maxCount;
+        }
+        // 二相逢: 2門有sequence
+        if ((mSeq && sSeq) || (mSeq && pSeq) || (sSeq && pSeq)) {
+            if (mSeq && sSeq) erXiangFengTotal += counts[m] + counts[s];
+            if (mSeq && pSeq) erXiangFengTotal += counts[m] + counts[p];
+            if (sSeq && pSeq) erXiangFengTotal += counts[s] + counts[p];
+        }
+    }
+    if (erXiangFengTotal >= 1) patterns.isErXiangFeng = true;
+    if (sanXiangFengTotal >= 1) {
+        patterns.isSanXiangFeng = true;
+        patterns.sanXiangFengCount = sanXiangFengTotal;
+    }
+    // 四同順 and 五同順 removed
+    
+    // ===== 同款類檢測 (同一數字，3門都有一對) =====
+    // 同款三連對: 3個數字各有對 (如11m11s11p)
+    // 到同款七連對: 7個數字各有對
+    let tongKuanCount = 0;
+    for (let num = 0; num < 9; num++) {
+        const m = num;      // 萬
+        const s = 9 + num;  // 索
+        const p = 18 + num; // 筒
+        if (counts[m] >= 2 && counts[s] >= 2 && counts[p] >= 2) {
+            tongKuanCount++;
+        }
+    }
+    if (tongKuanCount >= 3) patterns.isTongKuanSanLianDui = true;
+    if (tongKuanCount >= 4) patterns.isTongKuanSiLianDui = true;
+    if (tongKuanCount >= 5) patterns.isTongKuanWuLianDui = true;
+    if (tongKuanCount >= 6) patterns.isTongKuanLiuLianDui = true;
+    if (tongKuanCount >= 7) patterns.isTongKuanQiLianDui = true;
+    
+    // ===== 十六不搭檢測 =====
+    // 7張字牌 + 3款唔連既數牌
+    let nonConnectedSuits = 0;
+    for (let suit = 0; suit < 3; suit++) {
+        const base = suit * 9;
+        let hasNonConnected = false;
+        // 檢查係咪有 147, 258, 369 既 combination
+        if ((counts[base] > 0 || counts[base+3] > 0 || counts[base+6] > 0) &&
+            (counts[base+3] > 0 || counts[base+6] > 0)) {
+            nonConnectedSuits++;
+        }
+    }
+    if (ziCount >= 7 && nonConnectedSuits >= 3) {
+        patterns.isShiLiuBuDa = true;
+    }
+    
+    // ===== 混么九 / 清么九 (PDF定義) =====
+    // 混么九: 全副牌都係么九及番子 (1,9 + 字牌)
+    // 清么九: 全副牌都係么九 (得1,9，冇字牌)
+    
+    // 檢查有冇非么九既數牌 (2-8)
+    let hasNonYao = false;
+    for (let i = 1; i < 8; i++) { // 2-8 in each suit
+        if (counts[i] > 0 || counts[9+i] > 0 || counts[18+i] > 0) hasNonYao = true;
+    }
+    
+    // 清么九: 全部都係1/9，冇字牌
+    let has19 = (counts[0] > 0 || counts[8] > 0 || counts[9] > 0 || counts[17] > 0 || counts[18] > 0 || counts[26] > 0);
+    if (has19 && !hasNonYao && ziCount === 0) {
+        patterns.isQingYaoJiu = true;
+    }
+    // 混么九: 全部都係1/9 + 字牌
+    else if (has19 && !hasNonYao && ziCount > 0) {
+        patterns.isHunYaoJiu = true;
+    }
+    
+    // ===== 叫牌類型檢測 (適用於聽牌狀態) =====
+    patterns.waitingType = detectWaitingType(counts);
+    
+    // ===== 使用Tile ID既精確模式檢測 =====
+    if (options.tileObjects && options.tileObjects.length > 0) {
+        const idResults = identifyPatternsWithIds(options.tileObjects, options);
+        
+        // Merge results from tile ID-based detection
+        if (idResults.yiSeBuBuGao) {
+            // Check if it's 明 or 暗
+            let hasOpen = false;
+            for (let id of idResults.usedTileIds) {
+                const tile = options.tileObjects.find(t => t.id === id);
+                if (tile && tile.index !== undefined && options.openCounts && options.openCounts[tile.index] > 0) {
+                    hasOpen = true;
+                    break;
+                }
+            }
+            patterns.isYiSeBuBuGaoAn = !hasOpen;
+            patterns.isYiSeBuBuGaoMing = hasOpen;
+        }
+        
+        if (idResults.yiSeErBuGao) {
+            let hasOpen = false;
+            for (let id of idResults.usedTileIds) {
+                const tile = options.tileObjects.find(t => t.id === id);
+                if (tile && tile.index !== undefined && options.openCounts && options.openCounts[tile.index] > 0) {
+                    hasOpen = true;
+                    break;
+                }
+            }
+            patterns.isYiSeErBuGaoAn = !hasOpen;
+            patterns.isYiSeErBuGaoMing = hasOpen;
+        }
+        
+        if (idResults.yiSeSanBuGao) {
+            let hasOpen = false;
+            for (let id of idResults.usedTileIds) {
+                const tile = options.tileObjects.find(t => t.id === id);
+                if (tile && tile.index !== undefined && options.openCounts && options.openCounts[tile.index] > 0) {
+                    hasOpen = true;
+                    break;
+                }
+            }
+            patterns.isYiSeSanBuGaoAn = !hasOpen;
+            patterns.isYiSeSanBuGaoMing = hasOpen;
+        }
+    }
+    
+    return patterns;
+}
+
+// 叫牌類型檢測
+function detectWaitingType(counts) {
+    // 叫牌類型:
+    // 邊張 (Penchan): 12 + 3, 89 + 7
+    // 中洞 (Kanchan): 24 + 3, 57 + 6
+    // 對對碰 (Tankan): 111 + 1 (刻子等第4張)
+    // 獨聽 (Toi-toi): 等一對既另一張
+    
+    // 數牌先detect
+    for (let suit = 0; suit < 3; suit++) {
+        const base = suit * 9;
+        
+        // 邊張: 12等3, 89等7
+        if (counts[base+0] >= 1 && counts[base+1] >= 1 && counts[base+2] === 0) return '邊張';
+        if (counts[base+7] >= 1 && counts[base+8] >= 1 && counts[base+6] === 0) return '邊張';
+        
+        // 中洞: 24等3, 57等6
+        if (counts[base+1] >= 1 && counts[base+3] >= 1 && counts[base+2] === 0) return '中洞';
+        if (counts[base+4] >= 1 && counts[base+6] >= 1 && counts[base+5] === 0) return '中洞';
+    }
+    
+    // 對對碰: 任何位置有3張，等第4張
+    for (let i = 0; i < 34; i++) {
+        if (counts[i] === 3) return '對對碰';
+    }
+    
+    // 獨聽: 等對仔 (得1張)
+    for (let i = 0; i < 34; i++) {
+        if (counts[i] === 1) return '獨聽';
+    }
+    
+    return null;
+}
+
+// 番數計算 function
+function calculateFan(patterns, options = {}) {
+    const { flowers = 0, gang = 0, isZimo = false, isHaidi = false, isHeidi = false, isLian = 0, isZhuang = false } = options;
+    
+    let totalFan = 0;
+    const breakdown = [];
+    
+    // 花牌
+    if (flowers > 0) {
+        // 花牌每款只有一隻，最多8隻
+        const actualFlowers = Math.min(flowers, 8);
+        totalFan += actualFlowers;
+        breakdown.push({ name: `${actualFlowers}花`, fan: actualFlowers });
+    }
+    
+    // 風字坎: 風牌刻子 (1番)
+    if (patterns.hasFengKe) {
+        totalFan += 1;
+        breakdown.push({ name: '風字坎', fan: getFan('風字坎', 1) });
+    }
+    
+    // 箭刻: 中發白刻子 (1番)
+    if (patterns.hasJianKe) {
+        totalFan += 1;
+        breakdown.push({ name: '箭刻', fan: getFan('箭刻', 1) });
+    }
+    
+    // 四歸類 (明/暗) - 每個四張相同既牌都係一組四歸
+    // 四歸一(明): 5番, 四歸一(暗): 10番
+    // Count each occurrence separately
+    const siGuiYiAnCount = patterns.siGuiYiAnCount || 0;
+    const siGuiYiMingCount = patterns.siGuiYiMingCount || 0;
+    
+    // Add fan for each 四歸一
+    for (let i = 0; i < siGuiYiAnCount; i++) {
+        totalFan += 10;
+        breakdown.push({ name: '四歸一(暗)', fan: 10 });
+    }
+    for (let i = 0; i < siGuiYiMingCount; i++) {
+        totalFan += 5;
+        breakdown.push({ name: '四歸一(明)', fan: 5 });
+    }
+    
+    // 八歸類 (明/暗)
+    // 八歸一(明): 15番, 八歸一(暗): 30番
+    // 八歸四(明): 30番, 八歸四(暗): 60番
+    if (patterns.isBaGuiYiAn) {
+        totalFan += 30;
+        breakdown.push({ name: '八歸一(暗)', fan: 30 });
+    } else if (patterns.isBaGuiYiMing) {
+        totalFan += 15;
+        breakdown.push({ name: '八歸一(明)', fan: 15 });
+    }
+    
+    if (patterns.isBaGuiSiMing) {
+        totalFan += 30;
+        breakdown.push({ name: '八歸四(明)', fan: 30 });
+    }
+    
+    // 十二歸類 (明/暗)
+    // 十二歸一(明): 60番, 十二歸一(暗): 120番
+    // 十二歸四(明): 60番, 十二歸四(暗): 100番
+    if (patterns.isShiErGuiYiAn) {
+        totalFan += 120;
+        breakdown.push({ name: '十二歸一(暗)', fan: 120 });
+    } else if (patterns.isShiErGuiYiMing) {
+        totalFan += 60;
+        breakdown.push({ name: '十二歸一(明)', fan: 60 });
+    }
+    
+    if (patterns.isShiErGuiSiMing) {
+        totalFan += 60;
+        breakdown.push({ name: '十二歸四(明)', fan: 60 });
+    }
+    
+    // 基礎番數
+    if (isZimo) {
+        totalFan += 1;
+        breakdown.push({ name: '自摸', fan: getFan('自摸', 1) });
+    }
+    
+    if (isHaidi) {
+        totalFan += 10;
+        breakdown.push({ name: '海底撈月', fan: getFan('海底撈月', 10) });
+    }
+    
+    if (isHeidi) {
+        totalFan += 20;
+        breakdown.push({ name: '河底撈魚', fan: getFan('河底撈魚', 20) });
+    }
+    
+    // 槓
+    if (gang === 1) {
+        totalFan += 1;
+        breakdown.push({ name: '一槓', fan: getFan('一槓', 1) });
+    } else if (gang === 2) {
+        totalFan += 5;
+        breakdown.push({ name: '二槓', fan: getFan('二槓', 5) });
+    } else if (gang === 3) {
+        totalFan += 15;
+        breakdown.push({ name: '三槓', fan: getFan('三槓', 15) });
+    } else if (gang >= 4) {
+        totalFan += 30;
+        breakdown.push({ name: '四槓', fan: getFan('四槓', 30) });
+    }
+    
+    // 連莊 (removed - user says no such thing)
+    // if (isLian > 0) {
+    //     totalFan += 2 * isLian;
+    //     breakdown.push({ name: `連${isLian}`, fan: 2 * isLian });
+    // }
+    
+    if (isZhuang) {
+        totalFan += 1;
+        breakdown.push({ name: '莊', fan: getFan('莊', 1) });
+    }
+    
+    // 清一色/混一色/字一色 (互斥) - 根據PDF更新
+    let isSpecialYiSe = false;  // 標記：清一色/字一色 independent
+    if (patterns.isQingYiSe) {
+        totalFan += 80;
+        breakdown.push({ name: '清一色', fan: getFan('清一色', 80) });
+    } else if (patterns.isZiYiSe) {
+        // 字一色 = 120番 (獨立計算，不疊其他)
+        totalFan = 120;
+        breakdown.length = 0;
+        breakdown.push({ name: '字一色', fan: getFan('字一色', 120) });
+        isSpecialYiSe = true;
+    } else if (patterns.isHunYiSe) {
+        totalFan += 30;
+        breakdown.push({ name: '混一色', fan: getFan('混一色', 30) });
+    }
+    
+    // 門齊類
+    if (patterns.isQiMenQi) {
+        totalFan += 15;
+        breakdown.push({ name: '七門齊', fan: getFan('七門齊', 15) });
+    }
+    if (patterns.isDaQiMenQi) {
+        totalFan += 20;
+        breakdown.push({ name: '大七門齊', fan: getFan('大七門齊', 20) });
+    }
+    if (patterns.isXiaoQiMenQi) {
+        totalFan += 15;
+        breakdown.push({ name: '小七門齊', fan: getFan('小七門齊', 15) });
+    }
+    if (patterns.isWuMenQi) {
+        totalFan += 5;
+        breakdown.push({ name: '五門齊', fan: getFan('五門齊', 5) });
+    }
+    if (patterns.isDuanYao) {
+        totalFan += 10;
+        breakdown.push({ name: '斷么', fan: 10 });
+    }
+    if (patterns.isQueYiMen) {
+        totalFan += 10;
+        breakdown.push({ name: '缺一門', fan: getFan('缺一門', 10) });
+    }
+    if (patterns.isMenQianQing) {
+        totalFan += 5;
+        breakdown.push({ name: '門清', fan: getFan('門清', 5) });
+    }
+    // 花牌類 (庭芳)
+    if (patterns.isYouHua) {
+        totalFan += patterns.flowerCount;
+        breakdown.push({ name: '有花', fan: patterns.flowerCount });
+    }
+    if (patterns.isZhengHua) {
+        totalFan += 1;
+        breakdown.push({ name: '正花', fan: getFan('正花', 1) });
+    }
+    if (patterns.isWuZiHua) {
+        totalFan += 5;
+        breakdown.push({ name: '無字花', fan: getFan('無字花', 5) });
+    }
+    // Check if it's a real jiang yan (2/5/8 in m/p/s) or just an eye
+    if (patterns.isJiangYan) {
+        // Check the pair to determine if it's 將眼 or just 眼
+        // We need to check handCounts for a pair of 2/5/8 in m/p/s
+        let isRealJiangYan = false;
+        const jiangYanIndices = [1, 4, 7, 10, 13, 16, 19, 22, 25]; // 2,5,8 in m/p/s
+        if (patterns._pairIndex !== undefined && jiangYanIndices.includes(patterns._pairIndex)) {
+            isRealJiangYan = true;
+        }
+        
+        if (isRealJiangYan) {
+            totalFan += 1;
+            breakdown.push({ name: '將眼', fan: getFan('將眼', 1) });
+        } else {
+            // Just an eye, no fan - don't add to breakdown
+            // breakdown.push({ name: '眼', fan: 0 });
+        }
+    }
+    
+    // 暗刻類 - 坎坎胡同五暗刻都係門清
+    // 坎坎胡: 五暗刻 + 自摸 (100番) - 需要自摸先算坎坎胡
+    // 五暗刻: 五暗刻但唔係自摸 (80番)
+    // 對對胡: 有順子 OR 有公開牌 OR 唔係自摸
+    if (!isSpecialYiSe) {
+        // Override 坎坎胡: must be 自摸 (isZimo) and no open melds
+        // Since we don't have meld info here, we use isZimo from options
+        const isSelfDraw = options.isZimo || false;
+        
+        if (patterns.isKanKanHu) {
+            // If not self-draw, it's not 坎坎胡, it's 對對胡
+            // Note: This is a simplified check. Ideally we'd check meld structure.
+            if (!isSelfDraw) {
+                // Not self-draw = 對對胡
+                patterns.isKanKanHu = false;
+                patterns.isWuAnKe = false;
+                patterns.isDuiDuiHu = true;
+            } else {
+                totalFan += 100;
+                breakdown.push({ name: '坎坎胡', fan: getFan('坎坎胡', 100) });
+            }
+        } else if (patterns.isWuAnKe) {
+            totalFan += 80;
+            breakdown.push({ name: '五暗刻', fan: getFan('五暗刻', 80) });
+        } else if (patterns.isSiAnKe) {
+            totalFan += 30;
+            breakdown.push({ name: '四暗刻', fan: getFan('四暗刻', 30) });
+        } else if (patterns.isSanAnKe) {
+            totalFan += 15;
+            breakdown.push({ name: '三暗刻', fan: getFan('三暗刻', 15) });
+        } else if (patterns.isDuiDuiHu) {
+            totalFan += 30;
+            breakdown.push({ name: '對對胡', fan: getFan('對對胡', 30) });
+        }
+    }
+    
+    // 三元類 - 根據PDF
+    if (patterns.isDaSanYuan) {
+        totalFan += 40;
+        breakdown.push({ name: '大三元', fan: getFan('大三元', 40) });
+    } else if (patterns.isXiaoSanYuan) {
+        totalFan += 20;
+        breakdown.push({ name: '小三元', fan: getFan('小三元', 20) });
+    }
+    
+    // 四喜類
+    if (patterns.isDaSiXi) {
+        totalFan += 100;
+        breakdown.push({ name: '大四喜', fan: getFan('大四喜', 100) });
+    } else if (patterns.isXiaoSiXi) {
+        totalFan += 80;
+        breakdown.push({ name: '小四喜', fan: getFan('小四喜', 80) });
+    }
+    
+    // 順子類 - 般高 (根據PDF)
+    if (patterns.isSanBanGao) {
+        totalFan += 10;
+        breakdown.push({ name: '三般高', fan: getFan('三般高', 10) });
+    } else if (patterns.isYiBanGao) {
+        totalFan += 5;
+        breakdown.push({ name: '一般高', fan: getFan('一般高', 5) });
+    }
+    
+    // 老少類
+    if (patterns.hasLaoShao) {
+        totalFan += 3;
+        breakdown.push({ name: '老少', fan: getFan('老少', 3) });
+    }
+    
+    // 龍類 (根據PDF)
+    if (patterns.hasQingLong) {
+        totalFan += 20;
+        // [REMOVED] breakdown.push({ name: '清龍', fan: 20 }); // Already covered by 一色三步高
+    } else if (patterns.hasZaLong) {
+        // 雜龍 = 三色三步高, use 明/暗
+        // DEBUG
+        
+        if (options.openTileCount > 0) {
+            totalFan += 8;
+            breakdown.push({ name: '三色三步高(明)', fan: 8 });
+        } else {
+            totalFan += 15;
+            breakdown.push({ name: '三色三步高(暗)', fan: 15 });
+        }
+    }
+    
+    // 基礎番數
+    // 斷么 (已在上方計算)
+    
+    // 特殊牌型 (互斥，通常唔會同其他疊)
+    // 七對子/十三幺/十六不搭 各自獨立計番
+    if (patterns.isQiDuiZi) {
+        // 七對子清空其他番數，重新計算
+        totalFan = 10;
+        breakdown.length = 0;
+        breakdown.push({ name: '七對子', fan: 10 });
+    } else if (patterns.isShiSanYao) {
+        totalFan = 80;
+        breakdown.length = 0;
+        breakdown.push({ name: '十三幺', fan: 80 });
+    } else if (patterns.isQiXingBuKao) {
+        totalFan = 10;
+        breakdown.length = 0;
+        breakdown.push({ name: '七星不靠', fan: 10 });
+    }
+    
+    // ===== 新增牌型既番數 (根據PDF) =====
+    
+    // 十六不搭
+    if (patterns.isShiLiuBuDa) {
+        totalFan += 40;
+        breakdown.push({ name: '十六不搭', fan: 40 });
+    }
+    
+    // 嚦咕
+    if (patterns.isLiGu) {
+        totalFan += 40;
+        breakdown.push({ name: '嚦咕', fan: 40 });
+    }
+    
+    // 獨獨
+    if (patterns.isDuDu) {
+        totalFan += 2;
+        breakdown.push({ name: '獨獨', fan: 2 });
+    }
+    
+    // 兄弟類
+    if (patterns.isDaSanXiongDi) {
+        totalFan += 20;
+        breakdown.push({ name: '大三兄弟', fan: getFan('大三兄弟', 30) });
+    } else if (patterns.isXiaoSanXiongDi) {
+        totalFan += 10;
+        breakdown.push({ name: '小三兄弟', fan: getFan('小三兄弟', 10) });
+    } else if (patterns.isErXiongDi) {
+        totalFan += 5;
+        breakdown.push({ name: '二兄弟', fan: getFan('二兄弟', 5) });
+    }
+    
+    // 姊妹類
+    if (patterns.isLiuZiMei) {
+        totalFan += 160;
+        breakdown.push({ name: '六姊妹', fan: getFan('六姊妹', 160) });
+    } else if (patterns.isWuZiMei) {
+        totalFan += 60;
+        breakdown.push({ name: '五姊妹', fan: getFan('五姊妹', 60) });
+    } else if (patterns.isDaSanZiMei) {
+        totalFan += 15;
+        breakdown.push({ name: '大三姊妹', fan: getFan('大三姊妹', 15) });
+    } else if (patterns.isSiZiMei) {
+        totalFan += 30;
+        breakdown.push({ name: '四姊妹', fan: getFan('四姊妹', 30) });
+    } else if (patterns.isSanZiMei) {
+        totalFan += 8;
+        breakdown.push({ name: '三姊妹', fan: getFan('三姊妹', 8) });
+    } else if (patterns.isLiangZiMei) {
+        totalFan += 5;
+        breakdown.push({ name: '兩姊妹', fan: getFan('兩姊妹', 5) });
+    }
+    
+    // 同款類
+    if (patterns.isTongKuanQiLianDui) {
+        totalFan += 80;
+        breakdown.push({ name: '同款七連對', fan: getFan('同款七連對', 80) });
+    } else if (patterns.isTongKuanLiuLianDui) {
+        totalFan += 40;
+        breakdown.push({ name: '同款六連對', fan: getFan('同款六連對', 40) });
+    } else if (patterns.isTongKuanWuLianDui) {
+        totalFan += 20;
+        breakdown.push({ name: '同款五連對', fan: getFan('同款五連對', 20) });
+    } else if (patterns.isTongKuanSiLianDui) {
+        totalFan += 10;
+        breakdown.push({ name: '同款四連對', fan: getFan('同款四連對', 10) });
+    } else if (patterns.isTongKuanSanLianDui) {
+        totalFan += 5;
+        breakdown.push({ name: '同款三連對', fan: getFan('同款三連對', 5) });
+    }
+    
+    // 相逢類 (PDF定義)
+    if (patterns.isWuTongShun) {
+        totalFan += 40;
+        breakdown.push({ name: '五同順', fan: getFan('五同順', 40) });
+    } else if (patterns.isSiTongShun) {
+        totalFan += 20;
+        breakdown.push({ name: '四同順', fan: getFan('四同順', 20) });
+    } else if (patterns.isSanXiangFeng) {
+        totalFan += 10;
+        // Add multiple times if multiple 三相逢
+        for (let i = 0; i < (patterns.sanXiangFengCount || 0); i++) {
+            breakdown.push({ name: '三相逢', fan: getFan('三相逢', 10) });
+        }
+    } else if (patterns.isErXiangFeng) {
+        totalFan += 2;
+        breakdown.push({ name: '二相逢', fan: getFan('二相逢', 2) });
+    }
+    
+    // 混么九 / 清么九
+    if (patterns.isQingYaoJiu) {
+        totalFan += 80;
+        breakdown.push({ name: '清么九', fan: getFan('清么九', 80) });
+    } else if (patterns.isHunYaoJiu) {
+        totalFan += 30;
+        breakdown.push({ name: '混么九', fan: getFan('混么九', 30) });
+    }
+    
+    // 步高類 (明/暗)
+    // 三色步步高 (明5/暗10), 一色步步高 (明10/暗20)
+    if (patterns.isSanSeBuBuGaoAn) {
+        totalFan += 10;
+        breakdown.push({ name: '三色步步高(暗)', fan: 10 });
+    } else if (patterns.isSanSeBuBuGaoMing) {
+        totalFan += 5;
+        breakdown.push({ name: '三色步步高(明)', fan: 5 });
+    }
+    if (patterns.isYiSeBuBuGaoAn) {
+        totalFan += 20;
+        breakdown.push({ name: '一色步步高(暗)', fan: 20 });
+    } else if (patterns.isYiSeBuBuGaoMing) {
+        totalFan += 10;
+        breakdown.push({ name: '一色步步高(明)', fan: 10 });
+    }
+    
+    // 三色二步高 (明5/暗10), 一色二步高 (明8/暗15)
+    if (patterns.isSanSeErBuGaoAn) {
+        totalFan += 10;
+        breakdown.push({ name: '三色二步高(暗)', fan: 10 });
+    } else if (patterns.isSanSeErBuGaoMing) {
+        totalFan += 5;
+        breakdown.push({ name: '三色二步高(明)', fan: 5 });
+    }
+    if (patterns.isYiSeErBuGaoAn) {
+        totalFan += 15;
+        breakdown.push({ name: '一色二步高(暗)', fan: 15 });
+    } else if (patterns.isYiSeErBuGaoMing) {
+        totalFan += 8;
+        breakdown.push({ name: '一色二步高(明)', fan: 8 });
+    }
+    
+    // 三色三步高/雜龍 (明8/暗15), 一色三步高 (明10/暗20)
+    // Note: 雜龍 already covers 三色三步高, so skip when hasZaLong is true
+    if (!patterns.hasZaLong) {
+        if (patterns.isSanSeSanBuGaoAn) {
+            totalFan += 15;
+            breakdown.push({ name: '三色三步高(暗)', fan: 15 });
+        } else if (patterns.isSanSeSanBuGaoMing) {
+            totalFan += 8;
+            breakdown.push({ name: '三色三步高(明)', fan: 8 });
+        }
+    }
+    if (patterns.isYiSeSanBuGaoAn) {
+        totalFan += 20;
+        breakdown.push({ name: '一色三步高(暗)', fan: 20 });
+    } else if (patterns.isYiSeSanBuGaoMing) {
+        totalFan += 10;
+        breakdown.push({ name: '一色三步高(明)', fan: 10 });
+    }
+    
+    // 三色四步高 (明15/暗20), 一色四步高 (明15/暗25)
+    if (patterns.isSanSeSiBuGaoAn) {
+        totalFan += 20;
+        breakdown.push({ name: '三色四步高(暗)', fan: 20 });
+    } else if (patterns.isSanSeSiBuGaoMing) {
+        totalFan += 15;
+        breakdown.push({ name: '三色四步高(明)', fan: 15 });
+    }
+    if (patterns.isYiSeSiBuGaoAn) {
+        totalFan += 25;
+        breakdown.push({ name: '一色四步高(暗)', fan: 25 });
+    } else if (patterns.isYiSeSiBuGaoMing) {
+        totalFan += 15;
+        breakdown.push({ name: '一色四步高(明)', fan: 15 });
+    }
+    
+    // 三色五步高 (明20/暗30), 一色五步高 (明20/暗35)
+    if (patterns.isSanSeWuBuGaoAn) {
+        totalFan += 30;
+        breakdown.push({ name: '三色五步高(暗)', fan: 30 });
+    } else if (patterns.isSanSeWuBuGaoMing) {
+        totalFan += 20;
+        breakdown.push({ name: '三色五步高(明)', fan: 20 });
+    }
+    if (patterns.isYiSeWuBuGaoAn) {
+        totalFan += 35;
+        breakdown.push({ name: '一色五步高(暗)', fan: 35 });
+    } else if (patterns.isYiSeWuBuGaoMing) {
+        totalFan += 20;
+        breakdown.push({ name: '一色五步高(明)', fan: 20 });
+    }
+    
+    // 不搭三相逢
+    if (patterns.isBuDaSanXiangFeng) {
+        totalFan += 20;
+        breakdown.push({ name: '不搭三相逢', fan: getFan('不搭三相逢', 20) });
+    }
+    
+    // 門前清 (呢個需要牌池信息，暫時default)
+    // if (patterns.isMenQianQing) { ... }
+    
+    return { total: totalFan, breakdown };
+}
+
+// 添加 fan command - 計算每張聽牌既番數
+if (command === 'fan') {
+    const tiles = JSON.parse(args[1]);
+    // 額外參數: flowers, gang, zimo, haidi, heidi, lian, zhuang
+    const options = {
+        flowers: parseInt(args[2]) || 0,
+        gang: parseInt(args[3]) || 0,
+        isZimo: args[4] === '1',
+        isHaidi: args[5] === '1',
+        isHeidi: args[6] === '1',
+        isLian: parseInt(args[7]) || 0,
+        isZhuang: args[8] === '1'
+    };
+    
+    const { counts, wildcards } = preprocessTiles(tiles);
+    
+    // Create counts for open tiles and hand tiles separately for 明/暗 detection
+    const openCounts = new Array(34).fill(0);
+    const handCounts = new Array(34).fill(0);
+    if (options.openTiles && options.openTiles.length > 0) {
+        const { counts: oc } = preprocessTiles(options.openTiles);
+        for (let i = 0; i < 34; i++) options.openCounts[i] = oc[i];
+    }
+    if (options.handTiles && options.handTiles.length > 0) {
+        const { counts: hc } = preprocessTiles(options.handTiles);
+        for (let i = 0; i < 34; i++) options.handCounts[i] = hc[i];
+    }
+    
+    // 先搵waiting
+    const minShanten = getMinShanten(counts, wildcards, TILE_MODE);
+    const waitingResult = calculateWaiting(counts, wildcards, TILE_MODE);
+    const validWaitingTiles = Object.keys(waitingResult);
+    
+    // 如果已經聽牌，計算每張waiting既fan
+    const results = [];
+    
+    if (minShanten === 0 || minShanten === -1) {
+        // 如果已經胡牌(shanten=-1)，直接計算手牌既fan
+        if (minShanten === -1) {
+            const patterns = identifyPatterns(allTilesCounts, options);
+            const fanResult = calculateFan(patterns, options);
+            results.push({
+                tile: '胡牌',
+                shanten: -1,
+                fan: fanResult.total,
+                breakdown: fanResult.breakdown
+            });
+        } else {
+            // 聽牌既情況，計算每張waiting既fan
+            for (const tile of validWaitingTiles) {
+                const tileIdx = TILES.indexOf(tile);
+                if (tileIdx === -1 || counts[tileIdx] >= 4) continue;
+                
+                const testCounts = [...counts]; // counts is already hand-only
+                testCounts[tileIdx]++;
+                
+                // 計算fan
+                const patterns = identifyPatterns(testCounts, options);
+                const fanResult = calculateFan(patterns, options);
+                
+                results.push({
+                    tile: tile,
+                    shanten: 0,
+                    fan: fanResult.total,
+                    breakdown: fanResult.breakdown
+                });
+            }
+        }
+        
+        // 排序：fan既大到小
+        results.sort((a, b) => b.fan - a.fan);
+    }
+    
+    console.log(JSON.stringify({
+        shanten: minShanten,
+        waiting_with_fan: results.slice(0, 20) // 最多20張
+    }));
+}
+
+// 添加 full command - 完整輸出 (waiting + fan)
+// 添加 full command - 完整輸出 (waiting + fan)
+if (command === 'full') {
+    // Read hand/open tiles from environment variables
+    let handTilesArg = [];
+    let openTilesArg = [];
+    
+    try {
+        if (process.env.HAND_TILES) handTilesArg = JSON.parse(process.env.HAND_TILES);
+        if (process.env.OPEN_TILES) openTilesArg = JSON.parse(process.env.OPEN_TILES);
+    } catch(e) {
+    }
+    
+    // Calculate openTileCount from openTilesArg
+    const openTileCount = openTilesArg ? openTilesArg.length : 0;
+    
+    const tiles = JSON.parse(args[1]);
+    const expectedTiles = args[2] ? parseInt(args[2]) : 16;
+    TILE_MODE = args[3] ? parseInt(args[3]) : 16;
+    
+    // 驗證：每張牌最多4張
+    const { counts, wildcards, tileObjects } = preprocessTiles(tiles);
+    const tileNames = ['1m','2m','3m','4m','5m','6m','7m','8m','9m','1s','2s','3s','4s','5s','6s','7s','8s','9s','1p','2p','3p','4p','5p','6p','7p','8p','9p','1z','2z','3z','4z','5z','6z','7z'];
+    const invalidTiles = [];
+    for (let i = 0; i < 34; i++) {
+        if (counts[i] > 4) {
+            invalidTiles.push(`${tileNames[i]} (${counts[i]}張)`);
+        }
+    }
+    if (invalidTiles.length > 0) {
+        console.log(JSON.stringify({ error: '每張牌最多4張', invalid: invalidTiles }));
+        process.exit(1);
+    }
+    
+    // Create counts for open tiles and hand tiles separately for 明/暗 detection
+    const openCounts = new Array(34).fill(0);
+    const handCounts = new Array(34).fill(0);
+    
+    if (openTilesArg.length > 0) {
+        const { counts: oc } = preprocessTiles(openTilesArg);
+        for (let i = 0; i < 34; i++) openCounts[i] = oc[i];
+    }
+    if (handTilesArg.length > 0) {
+        const { counts: hc } = preprocessTiles(handTilesArg);
+        for (let i = 0; i < 34; i++) handCounts[i] = hc[i];
+    }
+    
+    const options = {
+        flowers: parseInt(args[4]) || 0,
+        gang: parseInt(args[5]) || 0,
+        isZimo: args[6] === '1',
+        isHaidi: args[7] === '1',
+        isHeidi: args[8] === '1',
+        isLian: parseInt(args[9]) || 0,
+        isZhuang: args[10] === '1',
+        openTileCount: openTileCount,
+        handTiles: handTilesArg,
+        openTiles: openTilesArg,
+        openCounts: openCounts,
+        handCounts: handCounts
+    };
+    // Get waiting with shanten calculation - use HAND TILES ONLY (open tiles are "dead")
+    const minShanten = getMinShanten(counts, wildcards, TILE_MODE);
+    
+    // For pattern detection, include both hand and open tiles
+    const allTilesCounts = new Array(34).fill(0);
+    for (let i = 0; i < 34; i++) {
+        allTilesCounts[i] = counts[i];
+    }
+    if (openTilesArg.length > 0) {
+        const { counts: oc } = preprocessTiles(openTilesArg);
+        for (let i = 0; i < 34; i++) allTilesCounts[i] += oc[i];
+    }
+    
+    const waitingResult = calculateWaiting(counts, wildcards, TILE_MODE);
+    const waiting = Object.keys(waitingResult).map(t => ({
+        tile: t,
+        count: waitingResult[t]
+    }));
+    
+    // 如果已經聽牌，搵埋fan
+    let waitingWithFan = [];
+    if (minShanten === -1) {
+        // 已經胡牌，直接計算手牌既fan
+        const patterns = identifyPatterns(allTilesCounts, options);
+        const fanResult = calculateFan(patterns, options);
+        waitingWithFan.push({
+            tile: '胡牌',
+            count: 0,
+            fan: fanResult.total,
+            breakdown: fanResult.breakdown
+        });
+    } else if (minShanten === 0) {
+        for (const w of waiting) {
+            // Start with hand-only counts, add waiting tile, then add open tiles for pattern detection
+            const testCounts = [...counts]; // hand-only
+            const tileIdx = TILES.indexOf(w.tile);
+            if (tileIdx >= 0) testCounts[tileIdx]++;
+            
+            // Add open tiles for pattern detection
+            if (openTilesArg.length > 0) {
+                const { counts: oc } = preprocessTiles(openTilesArg);
+                for (let i = 0; i < 34; i++) testCounts[i] += oc[i];
+            }
+            
+            const patterns = identifyPatterns(testCounts, options);
+            const fanResult = calculateFan(patterns, options);
+            
+            waitingWithFan.push({
+                tile: w.tile,
+                count: w.count,
+                fan: fanResult.total,
+                breakdown: fanResult.breakdown
+            });
+        }
+        waitingWithFan.sort((a, b) => b.fan - a.fan);
+    }
+    
+    console.log(JSON.stringify({
+        shanten: minShanten,
+        waiting: waiting,
+        waiting_with_fan: waitingWithFan
+    }));
+}
+
+// ============================================================
+// Phase 2: Meld Enumeration Functions (Backtracking)
+// ============================================================
+
+// Tile index helpers
+function getSuit(idx) {
+    if (idx < 9) return 'm';
+    if (idx < 18) return 'p';
+    if (idx < 27) return 's';
+    return 'z';
+}
+
+function getNumber(idx) {
+    return (idx % 9) + 1;
+}
+
+// Convert tile string to index (0-33)
+function tileToIdx(tile) {
+    const map = { 'm': 0, 's': 9, 'p': 18, 'z': 27 };
+    const suit = tile.slice(-1);
+    const num = parseInt(tile.slice(0, -1));
+    return map[suit] + num - 1;
+}
+
+// Enumerate all possible meld combinations using backtracking
+// Returns unique combinations (no duplicates)
+// Handles: 5 melds + 1 pair = 17 tiles for winning hands
+function enumerateMelds(tileIndices) {
+    const results = new Set();
+    const counts = new Array(34).fill(0);
+    
+    // Debug: validate input
+    for (const idx of tileIndices) {
+        if (idx < 0 || idx > 33 || isNaN(idx)) {
+            console.error('Invalid tile index:', idx);
+            return [];
+        }
+    }
+    
+    // Count tiles
+    for (const idx of tileIndices) {
+        counts[idx]++;
+    }
+    
+    // Helper to create unique key for a combination
+    // Format: each meld sorted internally, melds joined by |, pair as last
+    // Preserves order of melds to distinguish different combinations
+    function meldKey(melds, pair) {
+        // Sort tiles within each meld, but keep meld order
+        const meldPart = melds.map(m => [...m].sort((a,b) => a-b).join(','));
+        // Join melds with | (don't sort melds, keep order!)
+        const meldStr = meldPart.join('|');
+        const pairPart = pair ? [...pair].sort((a,b) => a-b).join(',') : '';
+        return meldStr + '||' + pairPart;
+    }
+    
+    // Get all possible melds from current counts
+    function getPossibleMelds(remainingCounts) {
+        const possible = [];
+        
+        // Try all Pongs (刻子)
+        for (let idx = 0; idx < 34; idx++) {
+            if (remainingCounts[idx] >= 3) {
+                possible.push({type: 'pong', tiles: [idx, idx, idx]});
+            }
+        }
+        
+        // Try all Chows (順子)
+        for (let idx = 0; idx < 27; idx++) {  // suit tiles only
+            const num = (idx % 9) + 1;
+            if (num <= 7) {
+                for (let offset = 0; offset <= 7 - num; offset++) {
+                    const a = idx + offset;
+                    const b = idx + offset + 1;
+                    const c = idx + offset + 2;
+                    if (remainingCounts[a] > 0 && remainingCounts[b] > 0 && remainingCounts[c] > 0) {
+                        possible.push({type: 'chow', tiles: [a, b, c]});
+                    }
+                }
+            }
+        }
+        
+        return possible;
+    }
+    
+    // Get all possible pairs
+    function getPossiblePairs(remainingCounts) {
+        const possible = [];
+        for (let idx = 0; idx < 34; idx++) {
+            if (remainingCounts[idx] >= 2) {
+                possible.push([idx, idx]);
+            }
+        }
+        return possible;
+    }
+    
+    // Strategy: form melds first, then find pair from remaining
+    function backtrack(currentMelds, remainingCounts) {
+        const used = currentMelds.flat().length;
+        const totalTiles = tileIndices.length;
+        
+        // Try to form more melds while we have tiles
+        const possibleMelds = getPossibleMelds(remainingCounts);
+                
+        if (possibleMelds.length === 0) {
+            // No more melds possible, try to find a pair from remaining
+            const possiblePairs = getPossiblePairs(remainingCounts);
+            
+            for (const pair of possiblePairs) {
+                results.add(meldKey(currentMelds, pair));
+            }
+            
+            // Only allow combinations with a valid pair (17 tiles = 5 melds + 1 pair)
+            // Don't save combinations without pairs as winning hands
+            return;
+        }
+        
+        // Removed 3+2 handling - causing bugs
+        
+        if (used >= totalTiles) {
+            // All tiles used for melds, check if we can form a pair
+            const possiblePairs = getPossiblePairs(remainingCounts);
+            for (const pair of possiblePairs) {
+                results.add(meldKey(currentMelds, pair));
+            }
+            // Also allow just melds
+            results.add(meldKey(currentMelds, null));
+            return;
+        }
+        
+        for (const meldObj of possibleMelds) {
+            const meld = meldObj.tiles;
+            // Apply meld
+            for (const idx of meld) {
+                remainingCounts[idx]--;
+            }
+            currentMelds.push(meld);
+            
+            // Recurse
+            backtrack(currentMelds, remainingCounts);
+            
+            // Undo
+            currentMelds.pop();
+            for (const idx of meld) {
+                remainingCounts[idx]++;
+            }
+        }
+    }
+    
+    backtrack([], counts);
+    
+    // Convert Set keys back to arrays and filter invalid combinations
+    const validCombos = Array.from(results).map(key => {
+        const parts = key.split('||');
+        const meldPart = parts[0];
+        const pairPart = parts[1] || '';
+        
+        // Parse melds
+        const melds = meldPart ? meldPart.split('|').filter(s => s).map(m => 
+            m.split(',').filter(s => s).map(n => parseInt(n))
+        ) : [];
+        
+        // Parse pair
+        const pair = pairPart ? pairPart.split(',').filter(s => s).map(n => parseInt(n)) : null;
+        
+        return [melds, pair];
+    }).filter(combo => {
+        // Validate: must have exactly 5 melds + 1 pair = 17 tiles
+        const melds = combo[0];
+        const pair = combo[1];
+        let tileCount = 0;
+        for (const m of melds) tileCount += m.length;
+        if (pair) tileCount += pair.length;
+        return tileCount === tileIndices.length;
+    });
+    
+    return validCombos;
+}
+
+// Convert meld indices to readable format
+function meldsToString(melds, pair = null) {
+    let str = melds.map(m => {
+        if (!m || m.length < 3) return '';
+        if (m[0] === m[1]) {
+            // Pong
+            return TILES[m[0]] + TILES[m[1]] + TILES[m[2]];
+        } else {
+            // Chow
+            return TILES[m[0]] + TILES[m[1]] + TILES[m[2]];
+        }
+    }).filter(s => s).join(' ');
+    if (pair && pair.length >= 2) {
+        str += ' | ' + TILES[pair[0]] + TILES[pair[1]];
+    }
+    return str;
+}
+
+// Test function
+function testEnumerateMelds() {
+    // Test 1: 123m 234m 345m (should be 1 combination)
+    console.log('\n=== Test 1: 123m 234m 345m ===');
+    const tiles1 = ['1m','2m','3m','2m','3m','4m','3m','4m','5m'].map(tileToIdx);
+    const results1 = enumerateMelds(tiles1);
+    console.log('Found', results1.length, 'unique combinations');
+    results1.forEach((r, i) => {
+        console.log(`Combo ${i+1}:`, meldsToString(r));
+    });
+    
+    // Test 2: 123m 234s 345p (三色, should be 1)
+    console.log('\n=== Test 2: 123m 234s 345p ===');
+    const tiles2 = ['1m','2m','3m','2s','3s','4s','3p','4p','5p'].map(tileToIdx);
+    const results2 = enumerateMelds(tiles2);
+    console.log('Found', results2.length, 'unique combinations');
+    results2.forEach((r, i) => {
+        console.log(`Combo ${i+1}:`, meldsToString(r));
+    });
+    
+    // Test 3: 123m 234m 345m (same suit - should have 1 way)
+    console.log('\n=== Test 3: 123m 234m 345m ===');
+    const tiles3 = ['1m','2m','3m','2m','3m','4m','3m','4m','5m'].map(tileToIdx);
+    const results3 = enumerateMelds(tiles3);
+    console.log('Found', results3.length, 'combinations');
+    results3.forEach((r, i) => console.log(`Combo ${i+1}:`, meldsToString(r)));
+    
+    // Test 4: 123m 234m 345m 456m 
+    console.log('\n=== Test 4: 123m 234m 345m 456m ===');
+    const tiles4 = ['1m','2m','3m','2m','3m','4m','3m','4m','5m','4m','5m','6m'].map(tileToIdx);
+    const results4 = enumerateMelds(tiles4);
+    console.log('Found', results4.length, 'combinations');
+    results4.forEach((r, i) => console.log(`Combo ${i+1}:`, meldsToString(r)));
+    
+    // Test 5: With pairs - 111m 222m 333p 456p 789s 東東 (should have more)
+    console.log('\n=== Test 5: 111m 222m 333p 456p 789s 東東 ===');
+    const tiles5 = ['1m','1m','1m','2m','2m','2m','3p','3p','3p','4p','5p','6p','7s','8s','9s','東','東'].map(tileToIdx);
+    const results5 = enumerateMelds(tiles5);
+    console.log('Found', results5.length, 'combinations');
+    results5.forEach((r, i) => console.log(`Combo ${i+1}:`, meldsToString(r)));
+}
+
+
+
+// ============================================================
+// Phase 3: Pattern Detection for Meld Combinations
+// ============================================================
+
+// Check patterns for a given meld combination
+function checkPatternsForMelds(melds, pair, openCounts = null, openTileCount = 0, handCountsInput = null, winningTile = null, isSelfDraw = true) {
+    // Use handCountsInput + openCounts for full tile counts (for pattern detection)
+    // This is needed for patterns like 三色二步高 that need all tiles
+    const actualHandCounts = handCountsInput || new Array(34).fill(0);
+    const actualOpenCounts = openCounts || new Array(34).fill(0);
+    
+    // Combine hand and open counts for pattern detection
+    const counts = new Array(34).fill(0);
+    for (let i = 0; i < 34; i++) {
+        counts[i] = (actualHandCounts[i] || 0) + (actualOpenCounts[i] || 0);
+    }
+    
+    // Add pair to counts and check jiang yan
+    let hasJiangYan = false;
+    if (pair && pair.length >= 2) {
+        const pairIdx = pair[0];
+        // Check if pair is valid jiang yan: must be 2/5/8 in m/p/s suits (NOT z)
+        // m: indices 0-8 (1m=0, 2m=1, ..., 5m=4, ..., 8m=7, 9m=8)
+        // s: indices 9-17 (1s=9, 2s=10, ..., 5s=13, ..., 8s=16, 9s=17)
+        // p: indices 18-26 (1p=18, 2p=19, ..., 5p=22, ..., 8p=25, 9p=26)
+        // z: indices 27-33
+        const isJiangYanSuit = (pairIdx >= 0 && pairIdx <= 26) && 
+                               ([1, 4, 7, 10, 13, 16, 19, 22, 25].includes(pairIdx));
+        
+        if (isJiangYanSuit) {
+            hasJiangYan = true;
+        }
+        
+        // Add pair count (only once, not twice!)
+        counts[pairIdx] += 2;
+    }
+    
+    // Use existing identifyPatterns function - need all options
+    // Already computed actualHandCounts and actualOpenCounts above
+    const actualOpenTileCount = openTileCount || actualOpenCounts.reduce((a, b) => a + b, 0);
+    const options = { 
+        flowers: 0, 
+        gang: 0, 
+        handCounts: actualHandCounts,
+        openCounts: actualOpenCounts,
+        openTileCount: actualOpenTileCount,
+        isZimo: false,
+        isHaidi: false,
+        isHeidi: false,
+        isLian: 0,
+        isZhuang: false,
+        // Override jiang yan detection
+        forceJiangYan: hasJiangYan
+    };
+    const patterns = identifyPatterns(counts, options);
+    
+    // Override 坎坎胡 and 對對胡 based on meld structure
+    // melds is available here: [type, idx, idx, idx] where type 0=chow, 1=pong, 2=kan
+    const meldCount = melds ? melds.length : 0;
+    const pongKanCount = ponCount + kanCount;
+    const hasShuffles = (meldCount > pongKanCount);  // 有順子就唔係坎坎胡
+    
+    console.log('DEBUG: meldCount=' + meldCount + ', pongKanCount=' + pongKanCount + ', hasShuffles=' + hasShuffles + ', hasOpenMelds=' + hasOpenMelds + ', isSelfDraw=' + isSelfDraw);
+    
+    // 坎坎胡: 5個刻子 + 無順子 + 全部手牌 + 自摸
+    if (patterns.isKanKanHu || patterns.isWuAnKe) {
+        console.log('DEBUG: isKanKanHu was true, checking conditions...');
+        if (hasShuffles || hasOpenMelds || !isSelfDraw) {
+            console.log('DEBUG: Overriding to 對對胡');
+            // 有順子 / 有公開牌 / 唔係自摸 = 對對胡, 唔係坎坎胡
+            patterns.isKanKanHu = false;
+            patterns.isWuAnKe = false;
+            patterns.isDuiDuiHu = true;
+        }
+    }
+    
+    // Only set jiang yan if there was a valid pair
+    if (hasJiangYan) {
+        patterns.isJiangYan = true;
+    } else {
+        patterns.isJiangYan = false;
+    }
+    
+    // Calculate fan
+    const fanResult = calculateFan(patterns, options);
+    
+    return {
+        patterns: patterns,
+        fan: fanResult.total,
+        breakdown: fanResult.breakdown
+    };
+}
+
+// Test function for Phase 3
+function testPhase3() {
+    console.log('\n=== Phase 3: Pattern Detection ===');
+    
+    // Test: 123m 123p 123s 456p 789s 東東 (17 tiles)
+    // Expected: 三色同順 (same sequence across 3 suits)
+    const tiles = ['1m','2m','3m','1p','2p','3p','1s','2s','3s','4p','5p','6p','7s','8s','9s','東','東'];
+    const tileIndices = tiles.map(tileToIdx);
+    
+    console.log('Input:', tiles.join(' '));
+    
+    const combinations = enumerateMelds(tileIndices);
+    console.log('Found', combinations.length, 'meld combinations');
+    console.log('First combo:', JSON.stringify(combinations[0]));
+    console.log('Combo type:', typeof combinations[0]);
+    console.log('Combo[0] type:', typeof combinations[0][0]);
+    if (Array.isArray(combinations[0][0])) {
+        console.log('Combo[0][0] is array, length:', combinations[0][0].length);
+    }
+    
+    // Check patterns for each combination
+    console.log('\nChecking patterns for each combination:');
+    
+    for (let i = 0; i < Math.min(combinations.length, 5); i++) {
+        const combo = combinations[i];
+        // Format: [meldsArray, something, pairArray]
+        let melds, pair;
+        if (Array.isArray(combo[0])) {
+            melds = combo[0];
+            pair = combo[1]; // pair is at index 1
+        } else {
+            melds = combo.melds;
+            pair = combo.pair;
+        }
+        const result = checkPatternsForMelds(melds, pair, null, 0, null, null, true);
+        
+        console.log(`\n--- Combination ${i+1} ---`);
+        console.log('Melds:', meldsToString(melds, pair));
+        console.log('Pair:', pair ? TILES[pair[0]] + TILES[pair[1]] : 'none');
+        console.log('Total Fan:', result.fan);
+        console.log('Breakdown:', result.breakdown.map(b => b.name + '(' + b.fan + ')').join(', '));
+    }
+}
+
+// Add to test
+
+// Run test if called directly
+if (process.argv[2] === 'test') {
+    testEnumerateMelds();
+    testPhase3();
+}
+
+// Handle command line arguments
+if (process.argv[2] === 'test_multi') {
+    let handTiles = [];
+    let openTiles = [];
+    let openTileCount = 0;
+    
+    try {
+        if (process.argv[3]) handTiles = JSON.parse(process.argv[3]);
+        if (process.argv[4]) openTiles = JSON.parse(process.argv[4]);
+        openTileCount = process.argv[5] ? parseInt(process.argv[5]) : 0;
+    } catch(e) {}
+    
+    if (handTiles.length === 0 && openTiles.length === 0) {
+        console.log(JSON.stringify({error: 'No tiles'}));
+        process.exit(0);
+    }
+    
+    const allTiles = [...handTiles, ...openTiles];
+    const tileIndices = allTiles.map(tileToIdx);
+    const combinations = enumerateMelds(tileIndices);
+    
+    // Calculate open counts
+    const openCounts = new Array(34).fill(0);
+    for (const t of openTiles) {
+        const idx = tileToIdx(t);
+        if (idx >= 0) openCounts[idx]++;
+    }
+    
+    // Calculate hand counts
+    const handCounts = new Array(34).fill(0);
+    for (const t of handTiles) {
+        const idx = tileToIdx(t);
+        if (idx >= 0) handCounts[idx]++;
+    }
+    
+    // Check patterns for each combination
+    const results = [];
+    for (const combo of combinations.slice(0, 10)) {  // Limit to 10
+        const melds = combo[0];
+        const pair = combo[1];
+        
+        // Assume self-draw if no open melds, otherwise not self-draw
+        const isSelfDraw = (openTileCount === 0);
+        const result = checkPatternsForMelds(melds, pair, openCounts, openTileCount, handCounts, null, isSelfDraw);
+        
+        results.push({
+            melds: meldsToString(melds, pair),
+            pair: pair ? TILES[pair[0]] + TILES[pair[1]] : null,
+            fan: result.fan,
+            breakdown: result.breakdown.map(b => ({name: b.name, fan: b.fan}))
+        });
+    }
+    
+    const startTime = Date.now();
+    
+    console.log(JSON.stringify({
+        input: allTiles,
+        total_combinations: combinations.length,
+        time_ms: Date.now() - startTime,
+        results: results
+    }, null, 2));
+    process.exit(0);
+}

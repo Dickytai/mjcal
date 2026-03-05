@@ -1,0 +1,1896 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>🀄 麻將聽牌計算機</title>
+<link rel="stylesheet" href="/static/app.css">
+
+<style>
+#editFanBtn { display:block; margin:10px auto; padding:8px 16px; background:#4CAF50;color:#fff;border:none;border-radius:4px;cursor:pointer; }
+#editFanBtn:hover { background:#45a049; }
+.edit-mode .fan-tag { position:relative; padding-left:25px; display:inline-block; margin:5px; }
+.edit-mode .fan-tag::before {
+    content:'✕'; position:absolute; left:2px; top:50%; transform:translateY(-50%);
+    color:red; cursor:pointer; font-weight:bold; font-size:14px;
+}
+.edit-mode .fan-num { 
+    background:#fff; border:1px solid #999; padding:2px 6px; 
+    min-width:30px; text-align:center; border-radius:3px;
+}
+#editTotalFan { font-weight:bold; color:#f39c12; font-size:18px; }
+
+.btn-select {
+    background: #ff9800;
+    color: white;
+    padding: 10px 15px;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 14px;
+}
+.btn-select.active {
+    background: #f44336;
+    animation: pulse 1s infinite;
+}
+.btn-select:hover {
+    opacity: 0.9;
+}
+@keyframes pulse {
+    0% { transform: scale(1); }
+    50% { transform: scale(1.05); }
+    100% { transform: scale(1); }
+}
+</style>
+</head>
+<body>
+<h1>🀄 麻將聽牌計算機</h1>
+    
+
+<div class="mode-select">
+    <button class="mode-btn active" id="mode16" data-mode="16">16張</button>
+
+</div>
+
+<!-- Debug Mode Panel -->
+<div class="debug-panel" id="debugPanel" style="display:none;">
+    <div class="debug-header">
+        <h3>🔧 牌型測試模式</h3>
+        <button onclick="toggleDebugMode()">關閉</button>
+    </div>
+    <div class="debug-content">
+        <div class="debug-section">
+            <label><strong>實際檢測 (即時)：</strong></label>
+            <div class="detected-patterns" id="detectedPatterns"></div>
+        </div>
+        <div class="debug-section">
+            <label><strong>修正組合 (勾選)：</strong></label>
+            <input type="text" id="patternSearch" placeholder="搜尋..." onkeyup="filterPatterns(this.value)" style="width:100%;padding:8px;margin:5px 0;border:1px solid #e94560;border-radius:5px;background:#0f0f23;color:#fff;">
+            <div class="pattern-checkboxes" id="patternCheckboxes"></div>
+        </div>
+    </div>
+</div>
+
+<div class="tile-count warning" id="tileCount">手牌: 0 | 公開牌: 0</div>
+
+<div class="display-section">
+    <div class="label active" id="openLabel">🔓 公開牌</div>
+    <div class="tile-display" id="openDisplay"></div>
+</div>
+
+<div class="display-section">
+    <div class="label" id="handLabel">🧱 手牌</div>
+    <div class="tile-display" id="handDisplay"></div>
+</div>
+
+<div class="code-input">
+    <div style="font-size:12px;color:#888;margin-bottom:4px;">代碼輸入框</div>
+    <input type="text" id="codeInput" placeholder="例如: 1112223334567m 或 111m222m333m456m7m">
+    <div class="hint">百搭: 1j=皇 2j=合 3j=萬 4j=筒 5j=索 6j=風 7j=番 8j=三元</div>
+    <div class="btn-row">
+        <button onclick="loadFromCode()">📥 載入代碼</button>
+        <button onclick="generateWinningHand()" class="btn-gen">🎲 生成17張胡牌</button>
+        <button onclick="calculate()" class="btn-calc">🔍 計算聽牌</button>
+        <button onclick="clearAll()" class="btn-clear">🗑️ 清除</button>
+
+        <button onclick="savePatternExample()" class="btn-save" id="saveBtn" style="display:none;">✅ 確認輸入牌型</button>
+        <button onclick="showFanSettings()" class="btn-settings" style="background:#9b59b6;">⚙️ 番數設定</button>
+    </div>
+</div>
+
+<p class="tip">提示：點擊上方「公開牌」或「手牌」可切換輸入模式</p>
+
+<div class="tile-section"><h3>🀇 萬子</h3><div class="tile-grid" id="wanTiles"></div></div>
+<div class="tile-section"><h3>🀐 索子</h3><div class="tile-grid" id="tiaoTiles"></div></div>
+<div class="tile-section"><h3>🀙 筒子</h3><div class="tile-grid" id="tongTiles"></div></div>
+<div class="tile-section"><h3>🀀 字牌</h3><div class="tile-grid" id="ziTiles"></div></div>
+<div class="tile-section"><h3>🀢 花牌</h3><div class="tile-grid" id="flowerTiles"></div></div>
+<div class="tile-section"><h3>🃏 百搭</h3><div class="tile-grid" id="wildTiles"></div></div>
+
+<!-- Row 1: Extra Info - 莊/自摸/圈局 -->
+<div id="extraInfoRow" style="display:none; margin:10px 0; padding:10px; background:linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius:10px; text-align:center; box-shadow:0 2px 8px rgba(0,0,0,0.2);">
+    <div style="display:inline-flex; align-items:center; margin:0 10px; color:#fff; font-size:16px;">
+        <label style="cursor:pointer; display:flex; align-items:center;">
+            <input type="checkbox" id="chk_zhuang" onchange="updateExtraInfo()" style="transform:scale(1.3);">
+            <b style="margin-left:5px;">🏠 莊</b>
+        </label>
+        <button onclick="changeZhuang(-1)" style="width:28px; height:28px; margin-left:10px; font-size:16px; cursor:pointer; border-radius:5px; border:none; background:#fff; color:#667eea;">-</button>
+        <input type="number" id="zhuangCount" value="0" min="0" max="99" onchange="updateExtraInfo()" style="width:45px; text-align:center; margin:0 5px; padding:4px; border-radius:5px; border:none; font-weight:bold;">
+        <button onclick="changeZhuang(1)" style="width:28px; height:28px; font-size:16px; cursor:pointer; border-radius:5px; border:none; background:#fff; color:#667eea;">+</button>
+    </div>
+    <label style="margin:0 15px; color:#fff; font-size:16px; cursor:pointer;"><input type="checkbox" id="chk_zimo" onchange="updateExtraInfo()" style="transform:scale(1.3);"> <b>✋ 自摸</b></label>
+    <div style="display:inline-flex; align-items:center; margin-left:15px; color:#fff; font-size:14px;">
+        <select id="quan_wind" onchange="updateExtraInfo()" style="padding:4px 8px; border-radius:5px; border:2px solid #fff; background:rgba(255,255,255,0.9); font-weight:bold; cursor:pointer;">
+            <option value="">選擇圈</option>
+            <option value="東">東圈</option>
+            <option value="南">南圈</option>
+            <option value="西">西圈</option>
+            <option value="北">北圈</option>
+        </select>
+        <span style="margin:0 3px;">圈</span>
+        <select id="wei_wind" onchange="updateExtraInfo()" style="padding:4px 8px; border-radius:5px; border:2px solid #fff; background:rgba(255,255,255,0.9); font-weight:bold; cursor:pointer;">
+            <option value="">選擇位</option>
+            <option value="東">東位</option>
+            <option value="南">南位</option>
+            <option value="西">西位</option>
+            <option value="北">北位</option>
+        </select>
+        <span style="margin:0 3px;">位</span>
+    </div>
+</div>
+
+<!-- Row 2: 追加番數 Section (expandable) -->
+<div id="extraFanSection" style="display:none; margin:10px 0; padding:12px; background:#fff; border:2px solid #4caf50; border-radius:10px; box-shadow:0 2px 6px rgba(0,0,0,0.1);">
+    <div onclick="toggleExtraFan()" style="cursor:pointer; font-weight:bold; color:#2e7d32; font-size:16px; display:flex; justify-content:space-between; align-items:center;">
+        <span>🎯 追加番數</span>
+        <span id="extraFanToggleIcon">▼</span>
+    </div>
+    <div id="extraFanContent" style="display:none; margin-top:12px; padding-top:10px; border-top:1px dashed #4caf50;">
+        <br><span style="color:#666;font-size:12px;">=== 特殊胡牌 ===</span>
+        <label style="display:inline-block; margin:5px 12px; color:#333; cursor:pointer;"><input type="checkbox" id="chk_tianhu" onchange="updateExtraFan()" style="transform:scale(1.2);"> 🌟 天胡 <b style="color:#e74c3c;">50番</b></label>
+        <label style="display:inline-block; margin:5px 12px; color:#333; cursor:pointer;"><input type="checkbox" id="chk_dihu" onchange="updateExtraFan()" style="transform:scale(1.2);"> 🌍 地胡 <b style="color:#e74c3c;">30番</b></label>
+        <label style="display:inline-block; margin:5px 12px; color:#333; cursor:pointer;"><input type="checkbox" id="chk_haidi" onchange="updateExtraFan()" style="transform:scale(1.2);"> 🌊 海底撈月 <b style="color:#e74c3c;">10番</b></label>
+        <label style="display:inline-block; margin:5px 12px; color:#333; cursor:pointer;"><input type="checkbox" id="chk_heidi" onchange="updateExtraFan()" style="transform:scale(1.2);"> 🐟 河底撈魚 <b style="color:#e74c3c;">20番</b></label>
+        <br><span style="color:#666;font-size:12px;">=== 聽牌類 ===</span>
+        <label style="display:inline-block; margin:5px 12px; color:#333; cursor:pointer;"><input type="checkbox" id="chk_tianti" onchange="updateExtraFan()" style="transform:scale(1.2);"> ⭐ 天聽 <b style="color:#e74c3c;">5番</b></label>
+        <label style="display:inline-block; margin:5px 12px; color:#333; cursor:pointer;"><input type="checkbox" id="chk_diti" onchange="updateExtraFan()" style="transform:scale(1.2);"> 🌍 地聽 <b style="color:#e74c3c;">3番</b></label>
+        <label style="display:inline-block; margin:5px 12px; color:#333; cursor:pointer;"><input type="checkbox" id="chk_renti" onchange="updateExtraFan()" style="transform:scale(1.2);"> 👤 人聽 <b style="color:#e74c3c;">2番</b></label>
+        <label style="display:inline-block; margin:5px 12px; color:#333; cursor:pointer;"><input type="checkbox" id="chk_tingpaijishi" onchange="updateExtraFan()" style="transform:scale(1.2);"> 🎯 聽牌即食 <b style="color:#e74c3c;">2番</b></label>
+        <label style="display:inline-block; margin:5px 12px; color:#333; cursor:pointer;"><input type="checkbox" id="chk_tingpai" onchange="updateExtraFan()" style="transform:scale(1.2);"> 🎯 聽牌 <b style="color:#e74c3c;">1番</b></label>
+        <br><span style="color:#666;font-size:12px;">=== 搶槓類 ===</span>
+        <label style="display:inline-block; margin:5px 12px; color:#333; cursor:pointer;"><input type="checkbox" id="chk_yiqiangqi" onchange="updateExtraFan()" style="transform:scale(1.2);"> ⚡ 一搶七 <b style="color:#e74c3c;">8番</b></label>
+        <label style="display:inline-block; margin:5px 12px; color:#333; cursor:pointer;"><input type="checkbox" id="chk_qiqiangyi" onchange="updateExtraFan()" style="transform:scale(1.2);"> ⚡ 七搶一 <b style="color:#e74c3c;">10番</b></label>
+        <br><span style="color:#666;font-size:12px;">=== 自摸類 ===</span>
+        <label style="display:inline-block; margin:5px 12px; color:#333; cursor:pointer;"><input type="checkbox" id="chk_gangshang" onchange="updateExtraFan()" style="transform:scale(1.2);"> 🎴 槓上花 <b style="color:#e74c3c;">8番</b></label>
+        <label style="display:inline-block; margin:5px 12px; color:#333; cursor:pointer;"><input type="checkbox" id="chk_huashangzimo" onchange="updateExtraFan()" style="transform:scale(1.2);"> 🌸 花上自摸 <b style="color:#e74c3c;">8番</b></label>
+        <label style="display:inline-block; margin:5px 12px; color:#333; cursor:pointer;"><input type="checkbox" id="chk_gangshangzimo" onchange="updateExtraFan()" style="transform:scale(1.2);"> 🎴 槓上自摸 <b style="color:#e74c3c;">8番</b></label>
+        <label style="display:inline-block; margin:5px 12px; color:#333; cursor:pointer;"><input type="checkbox" id="chk_gangshanggangzimo" onchange="updateExtraFan()" style="transform:scale(1.2);"> 🎴 槓上槓自摸 <b style="color:#e74c3c;">16番</b></label>
+        <br><span style="color:#666;font-size:12px;">=== 內子類 ===</span>
+        <label style="display:inline-block; margin:5px 12px; color:#333; cursor:pointer;"><input type="checkbox" id="chk_sizinei" onchange="updateExtraFan()" style="transform:scale(1.2);"> 🔢 四只內 <b style="color:#e74c3c;">20番</b></label>
+        <label style="display:inline-block; margin:5px 12px; color:#333; cursor:pointer;"><input type="checkbox" id="chk_qizinei" onchange="updateExtraFan()" style="transform:scale(1.2);"> 🔢 七只內 <b style="color:#e74c3c;">30番</b></label>
+        <label style="display:inline-block; margin:5px 12px; color:#333; cursor:pointer;"><input type="checkbox" id="chk_shizinei" onchange="updateExtraFan()" style="transform:scale(1.2);"> 🔢 十只內 <b style="color:#e74c3c;">40番</b></label>
+        <br><span style="color:#666;font-size:12px;">=== 響類 ===</span>
+        <label style="display:inline-block; margin:5px 12px; color:#333; cursor:pointer;"><input type="checkbox" id="chk_shuangxiang" onchange="updateExtraFan()" style="transform:scale(1.2);"> 🔔 雙響 <b style="color:#e74c3c;">5番</b></label>
+        <label style="display:inline-block; margin:5px 12px; color:#333; cursor:pointer;"><input type="checkbox" id="chk_sanxiang" onchange="updateExtraFan()" style="transform:scale(1.2);"> 🔔 三響 <b style="color:#e74c3c;">10番</b></label>
+        <label style="display:inline-block; margin:5px 12px; color:#333; cursor:pointer;"><input type="checkbox" id="chk_shuangxiangbaochou" onchange="updateExtraFan()" style="transform:scale(1.2);"> 🔔 雙響報仇 <b style="color:#e74c3c;">10番</b></label>
+        <label style="display:inline-block; margin:5px 12px; color:#333; cursor:pointer;"><input type="checkbox" id="chk_sanxiangbaochou" onchange="updateExtraFan()" style="transform:scale(1.2);"> 🔔 三響報仇 <b style="color:#e74c3c;">20番</b></label>
+    </div>
+</div>
+
+<!-- Row 3: 結果顯示區 -->
+<div class="result-section" id="resultSection">
+    <div class="result-box">
+        <div class="shanten" id="shantenResult"></div>
+        <button id="editFanBtn" onclick="toggleEditFan()" style="display:none;">✏️ 編輯番數</button>
+        <div class="waiting-grid" id="waitingGrid"></div>
+    </div>
+</div>
+
+<!-- Custom Modal -->
+<div class="modal" id="modal">
+    <div class="modal-content">
+        <span class="modal-close" onclick="closeModal()">&times;</span>
+        <div id="modalBody"></div>
+    </div>
+</div>
+
+<script>
+// ===== 常量/全局變量 =====
+const TILES = {{ tiles_json | tojson | safe }};
+const FLOWER_TILES = {{ flower_json | tojson | safe }};
+const WILDCARDS = {{ wildcards_json | tojson | safe }};
+
+// State
+let gameMode = 16;
+let openTiles = [];
+let handTiles = [];
+let selectingWinTile = false;
+let selectedWinTile = null;
+let inputMode = 'open';
+
+// Initialize
+// ===== 初始化 =====
+function init() {
+    renderButtons();
+    bindEvents();
+    setInputMode('open');
+}
+
+// Bind events
+function bindEvents() {
+    document.getElementById('openDisplay').addEventListener('click', () => setInputMode('open'));
+    document.getElementById('handDisplay').addEventListener('click', () => setInputMode('hand'));
+    document.querySelectorAll('.mode-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => setMode(parseInt(e.target.dataset.mode)));
+    });
+}
+
+// Render tile buttons
+function renderButtons() {
+    const suits = [
+        { id: 'wanTiles', key: 'wan', tiles: ['1m','2m','3m','4m','5m','6m','7m','8m','9m'] },
+        { id: 'tiaoTiles', key: 'tiao', tiles: ['1s','2s','3s','4s','5s','6s','7s','8s','9s'] },
+        { id: 'tongTiles', key: 'tong', tiles: ['1p','2p','3p','4p','5p','6p','7p','8p','9p'] },
+        { id: 'ziTiles', key: 'zi', tiles: ['1z','2z','3z','4z','5z','6z','7z'] },
+    ];
+
+    suits.forEach(s => {
+        const container = document.getElementById(s.id);
+        s.tiles.forEach(tile => {
+            const btn = document.createElement('button');
+            btn.className = 'tile-btn ' + s.key;
+            btn.textContent = TILES[tile]?.unicode || '?';
+            btn.onclick = () => addTile(tile);
+            container.appendChild(btn);
+        });
+    });
+
+    // Flower tiles - display seasons first (春夏秋冬), then flowers (梅蘭菊竹)
+    const flowerContainer = document.getElementById('flowerTiles');
+    // Order: 春夏秋冬梅蘭菊竹
+    const flowerOrder = ['春', '夏', '秋', '冬', '梅', '蘭', '菊', '竹'];
+    flowerOrder.forEach(tile => {
+        if (FLOWER_TILES[tile]) {
+            const btn = document.createElement('button');
+            btn.className = 'tile-btn flower';
+            btn.textContent = FLOWER_TILES[tile].unicode;
+            btn.onclick = () => addTile(tile);
+            flowerContainer.appendChild(btn);
+        }
+    });
+
+    // Wildcards
+    const wildContainer = document.getElementById('wildTiles');
+    Object.keys(WILDCARDS).forEach(key => {
+        const w = WILDCARDS[key];
+        const btn = document.createElement('button');
+        btn.className = 'tile-btn wild';
+        // Show both unicode and name
+        btn.textContent = w.name;
+        btn.title = w.name + ': ' + w.替代;
+        btn.onclick = () => addTile(w.code);
+
+        wildContainer.appendChild(btn);
+    });
+}
+
+// Add tile
+// ===== 牌管理 =====
+function addTile(tile) {
+    // Check if it's a flower tile
+    const isFlower = FLOWER_TILES && FLOWER_TILES[tile] !== undefined;
+    
+    // Flower tiles can only be added to open area
+    if (isFlower && inputMode !== 'open') {
+        alert('花牌只能放入公開區！');
+        return;
+    }
+    
+    const arr = inputMode === 'open' ? openTiles : handTiles;
+    const counts = {};
+    arr.forEach(t => counts[t] = (counts[t] || 0) + 1);
+
+    // Flower tiles can only have 1 copy
+    if (isFlower && (counts[tile] || 0) >= 1) {
+        alert('花牌每款只能1張！');
+        return;
+    }
+    
+    // Non-flower tiles max 4 copies
+    if (!isFlower && (counts[tile] || 0) >= 4) {
+        alert('每張牌最多4張！');
+        return;
+    }
+
+    if (inputMode === 'open') {
+        if (openTiles.length >= 16) {
+            alert('公開牌最多16張！');
+            return;
+        }
+        openTiles.push(tile);
+    } else {
+        if (handTiles.length >= 17) {
+            alert('手牌最多17張！');
+            return;
+        }
+        handTiles.push(tile);
+    }
+    updateDisplay();
+}
+
+// Remove tile
+function removeTile(arr, index) {
+    arr.splice(index, 1);
+    updateDisplay();
+}
+
+// Update display
+function updateDisplay() {
+    document.getElementById('tileCount').textContent = '手牌: ' + handTiles.length + ' | 公開牌: ' + openTiles.length;
+
+    const od = document.getElementById('openDisplay');
+    od.innerHTML = '';
+    openTiles.forEach((t, i) => {
+        const d = createTileDiv(t);
+        d.onclick = () => removeTile(openTiles, i);
+        od.appendChild(d);
+    });
+
+    const hd = document.getElementById('handDisplay');
+    hd.innerHTML = '';
+    handTiles.forEach((t, i) => {
+        const d = createTileDiv(t);
+        d.onclick = () => {
+                if (selectingWinTile) {
+                    selectWinTile(t);
+                } else {
+                    removeTile(handTiles, i);
+                }
+            };
+        hd.appendChild(d);
+    });
+}
+
+// Create tile div
+function createTileDiv(tile) {
+    const d = document.createElement('div');
+    let c = 'tile ';
+    if (TILES[tile]) c += TILES[tile].suit;
+    else if (FLOWER_TILES[tile]) c += FLOWER_TILES[tile].suit;
+    else if (tile.endsWith('j')) c += 'wild';
+    d.className = c;
+    
+    // Get display text - check WILDCARDS first!
+    let text = tile;
+    if (tile.endsWith('j')) {
+        // Wildcards - use WILDCARDS name
+        text = WILDCARDS[tile] ? WILDCARDS[tile].name : tile;
+    } else if (TILES[tile]) text = TILES[tile].unicode;
+    else if (FLOWER_TILES[tile]) text = FLOWER_TILES[tile].unicode;
+    
+    d.innerHTML = text + '<span class="remove">×</span>';
+    return d;
+}
+
+// Set input mode
+// ===== 模式/輸入 =====
+function setInputMode(mode) {
+    inputMode = mode;
+    document.getElementById('openLabel').classList.toggle('active', mode === 'open');
+    document.getElementById('handLabel').classList.toggle('active', mode === 'hand');
+    document.getElementById('openDisplay').classList.toggle('active', mode === 'open');
+    document.getElementById('handDisplay').classList.toggle('active', mode === 'hand');
+}
+
+// Set game mode
+function setMode(mode) {
+    gameMode = mode;
+    document.querySelectorAll('.mode-btn').forEach(btn => {
+        btn.classList.toggle('active', parseInt(btn.dataset.mode) === mode);
+    });
+}
+
+// Load from code
+function loadFromCode() {
+    const code = document.getElementById('codeInput').value.trim();
+    if (!code) { alert('請輸入牌代碼'); return; }
+
+    handTiles = [];
+    openTiles = [];
+
+    const tokens = code.match(/[0-9]+[mpsznj]/g) || [];
+    tokens.forEach(token => {
+        const num = token.slice(0, -1);
+        const suit = token.slice(-1);
+        
+        // Handle wildcards (j) - keep as-is
+        if (suit === 'j') {
+            // Each digit becomes a separate wildcard
+            for (let i = 0; i < num.length; i++) {
+                handTiles.push(num[i] + 'j');
+            }
+        } else {
+            // Handle normal tiles
+            for (let i = 0; i < num.length; i++) {
+                const tile = num[i] + suit;
+                if (TILES[tile]) handTiles.push(tile);
+            }
+        }
+    });
+
+    updateDisplay();
+    calculate();
+}
+
+// Generate winning hand
+// Generate winning hand - use backend API for 100% success
+// ===== 遊戲邏輯 =====
+function generateWinningHand() {
+    fetch('/generate')
+        .then(r => r.json())
+        .then(data => {
+            if (data.hand) {
+                handTiles = data.hand;
+                openTiles = [];
+                
+                // Display the tile codes in the input field
+                const allTilesStr = handTiles.join(' ');
+                document.getElementById('codeInput').value = allTilesStr;
+                
+                updateDisplay();
+                // Trigger calculation and update detected patterns
+                if (false) {
+                    calculate();
+                } else {
+                    setTimeout(calculate, 100);
+                }
+            } else {
+                alert('生成失敗，請再試');
+            }
+        })
+        .catch(e => {
+            showModal('Error: ' + e.message);
+        });
+}
+
+function idxToTile(idx) {
+    if (idx === undefined || idx === null || isNaN(idx) || idx < 0 || idx >= 34) return '';
+    const suits = ['m', 's', 'p'];
+    const suit = Math.floor(idx / 9);
+    const num = idx % 9;
+    return (num + 1) + suits[suit];
+}
+
+// Calculate
+// ===== 計算 =====
+// Function to render extra fan checkboxes from FAN_CONFIG
+function renderExtraFanCheckboxes() {
+    const container = document.getElementById('extraFanContent');
+    if (!container) return;
+    
+    // Define categories with their items
+    const categories = {
+        "特殊胡牌": [
+            {id: 'chk_tianhu', name: '天胡', emoji: '🌟'},
+            {id: 'chk_dihu', name: '地胡', emoji: '🌍'},
+            {id: 'chk_haidi', name: '海底撈月', emoji: '🌊'},
+            {id: 'chk_heidi', name: '河底撈魚', emoji: '🐟'}
+        ],
+        "聽牌類": [
+            {id: 'chk_tianti', name: '天聽', emoji: '⭐'},
+            {id: 'chk_diti', name: '地聽', emoji: '🌍'},
+            {id: 'chk_renti', name: '人聽', emoji: '👤'},
+            {id: 'chk_tingpaijishi', name: '聽牌即食', emoji: '🎯'}
+        ],
+        "搶槓類": [
+            {id: 'chk_qianggang', name: '搶槓', emoji: '⚡'},
+            {id: 'chk_yiqiangqi', name: '一搶七', emoji: '⚡'},
+            {id: 'chk_qiqiangyi', name: '七搶一', emoji: '⚡'}
+        ],
+        "自摸類": [
+            {id: 'chk_gangshang', name: '槓上花', emoji: '🎴'},
+            {id: 'chk_huashangzimo', name: '花上自摸', emoji: '🌸'},
+            {id: 'chk_gangshangzimo', name: '槓上自摸', emoji: '🎴'},
+            {id: 'chk_gangshanggangzimo', name: '槓上槓自摸', emoji: '🎴'}
+        ],
+        "內子類": [
+            {id: 'chk_sizinei', name: '四只內', emoji: '🔢'},
+            {id: 'chk_qizinei', name: '七只內', emoji: '🔢'},
+            {id: 'chk_shizinei', name: '十只內', emoji: '🔢'}
+        ],
+        "響類": [
+            {id: 'chk_shuangxiang', name: '雙響', emoji: '🔔'},
+            {id: 'chk_sanxiang', name: '三響', emoji: '🔔'},
+            {id: 'chk_shuangxiangbaochou', name: '雙響報仇', emoji: '🔔'},
+            {id: 'chk_sanxiangbaochou', name: '三響報仇', emoji: '🔔'}
+        ]
+    };
+    
+    let html = '';
+    for (const [catName, items] of Object.entries(categories)) {
+        html += '<br><span style="color:#666;font-size:12px;">=== ' + catName + ' ===</span>';
+        for (const item of items) {
+            const fan = currentFanConfig[item.name] || EXTRA_FAN_ITEMS[item.id]?.fan || 0;
+            html += '<label style="display:inline-block; margin:5px 12px; color:#333; cursor:pointer;">';
+            html += '<input type="checkbox" id="' + item.id + '" onchange="updateExtraFan()" style="transform:scale(1.2);"> ';
+            html += item.emoji + ' ' + item.name + ' <b style="color:#e74c3c;">' + fan + '番</b></label>';
+        }
+    }
+    
+    container.innerHTML = html;
+}
+
+
+// 選擇胡牌功能
+function toggleSelectWinTile() {
+    selectingWinTile = !selectingWinTile;
+    selectedWinTile = null;
+    const btn = document.getElementById('btnSelectWin');
+    if (selectingWinTile) {
+        btn.classList.add('active');
+        btn.textContent = '❌ 取消選擇';
+    } else {
+        btn.classList.remove('active');
+        btn.textContent = '🎯 選擇胡牌';
+    }
+    renderHand();
+}
+
+function selectWinTile(tile) {
+    selectedWinTile = tile;
+    selectingWinTile = false;
+    const btn = document.getElementById('btnSelectWin');
+    btn.classList.remove('active');
+    btn.textContent = '🎯 選擇胡牌: ' + tile;
+    renderHand();
+}
+
+function calculate() {
+    if (handTiles.length === 0) {
+        alert('請先選擇手牌！');
+        return;
+    }
+    // Get 自摸 status
+    const zimoCheckbox = document.getElementById('chk_zimo');
+    const isZimo = zimoCheckbox && zimoCheckbox.checked;
+    
+    // Count flower tiles
+    const allTilesCombined = [...handTiles, ...openTiles];
+    
+    // 如果選擇了胡牌，添加到手牌中
+    let tilesToCalc = allTilesCombined;
+    if (selectedWinTile) {
+        tilesToCalc = [...handTiles, selectedWinTile, ...openTiles];
+    }
+    const flowerCount = allTilesCombined.filter(t => t.startsWith('F') || (FLOWER_TILES && FLOWER_TILES[t])).length;
+    
+    fetch('/calc', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ hand: selectedWinTile ? [...handTiles, selectedWinTile] : handTiles, open: openTiles, mode: gameMode, is_zimo: isZimoCount,, flowers: flower winning_tile: selectedWinTile })
+    }).then(r => r.json()).then(showResult);
+}
+
+// Show result
+function showResult(d) {
+    const s = document.getElementById('resultSection');
+    s.classList.add('show');
+
+    let shantenText = '';
+    let shantenClass = '';
+
+    // Show extra info row and extra fan section for winning hands
+    if (d.shanten === -1) {
+        document.getElementById('extraInfoRow').style.display = 'block';
+        document.getElementById('extraFanSection').style.display = 'block';
+    } else {
+        document.getElementById('extraInfoRow').style.display = 'none';
+        document.getElementById('extraFanSection').style.display = 'none';
+    }
+    
+    if (d.shanten === -1) {
+        // Add extra fan items to breakdown and total
+        let breakdown = (d.winning_breakdown || []).slice();
+        let extraFanTotal = 0;
+        for (const item of extraFanList) {
+            breakdown.push({ name: item.name, fan: item.fan });
+            extraFanTotal += item.fan;
+        }
+        // Sort by fan descending
+        breakdown.sort((a, b) => b.fan - a.fan);
+        let totalFan = (d.winning_fan || 0) + extraFanTotal;
+        shantenText = '🀄 已胡牌！總番數: ' + totalFan + ' 番';
+        shantenClass = ' tenpai';
+
+        // Display winning combinations
+        var combinations = d.winning_combinations || [];
+        
+        if (breakdown.length > 0) {
+            var html = '';
+            
+            // Deduplicate combinations (same breakdown = same combo)
+            var uniqueCombos = [];
+            var seenBreakdowns = {};
+            for (var i = 0; i < combinations.length; i++) {
+                var bd = combinations[i].breakdown || [];
+                var key = bd.map(function(b) { return b.name + ':' + b.fan; }).sort().join('|');
+                if (!seenBreakdowns[key]) {
+                    seenBreakdowns[key] = true;
+                    uniqueCombos.push(combinations[i]);
+                }
+            }
+            
+            // If multiple valid combinations, show dropdown
+            if (uniqueCombos.length > 1) {
+                // Sort by fan (highest first)
+                var sorted = uniqueCombos.slice().sort(function(a, b) { return b.fan - a.fan; });
+                
+                // Build dropdown
+                html = html + '<div style="margin-bottom:10px;">';
+                html = html + '<select id="comboSelect" onchange="showCombo(this.value)" style="padding:8px;width:100%;">';
+                
+                for (var i = 0; i < sorted.length; i++) {
+                    var fan = sorted[i].fan || 0;
+                    html = html + '<option value="' + i + '">組合' + (i+1) + ' (' + fan + '番)</option>';
+                }
+                
+                html = html + '</select></div>';
+                html = html + '<div id="comboDisplay">';
+                html = html + '</div>';
+                
+                // Store for switching
+                html = html + '<div style="display:none;" id="comboData">' + JSON.stringify(sorted) + '</div>';
+                
+                document.getElementById('waitingGrid').innerHTML = html;
+                
+                // Show first (highest fan) combo
+                showCombo(0);
+                
+                // Add extra fan items to the selected combination and recalculate fan
+                let comboBreakdown = sorted[0].breakdown.slice();
+                let extraFanForCombo = 0;
+                for (const item of extraFanList) {
+                    comboBreakdown.push({ name: item.name, fan: item.fan });
+                    extraFanForCombo += item.fan;
+                }
+                comboBreakdown.sort(function(a, b) { return b.fan - a.fan; });
+                
+                // Update the display fan to include extra
+                sorted[0].fan = sorted[0].fan + extraFanForCombo;
+                
+                // Also set currentBreakdown for edit mode
+                currentBreakdown = comboBreakdown;
+                
+                document.getElementById('editFanBtn').style.display = 'block';
+            } else {
+                // Single combination - breakdown already has extra items added above
+                currentBreakdown = breakdown;
+                
+                // Update display to show correct total in dropdown
+                // (already done in the totalFan calculation above)
+                var bdHtml = '';
+                for (var i = 0; i < currentBreakdown.length; i++) {
+                    bdHtml = bdHtml + '<span class="fan-tag">' + currentBreakdown[i].name + '<span class="fan-num">' + currentBreakdown[i].fan + '</span></span>';
+                }
+                html = '<div class="fan-list">' + bdHtml + '</div>';
+                document.getElementById('waitingGrid').innerHTML = html;
+                document.getElementById('editFanBtn').style.display = 'block';
+            }
+        } else {
+            document.getElementById('editFanBtn').style.display = 'none';
+        }
+    } else if (d.shanten === 0) {
+        shantenText = '🎉 已聽牌!';
+        shantenClass = ' tenpai';
+    } else if (d.shanten > 0) {
+        shantenText = '向聽數: ' + d.shanten;
+    } else {
+        shantenText = '❌ 未能聽牌';
+    }
+
+    document.getElementById('shantenResult').textContent = shantenText;
+    document.getElementById('shantenResult').className = 'shanten' + shantenClass;
+
+    const g = document.getElementById('waitingGrid');
+    // Show extra info row and extra fan section for winning hands
+    if (d.shanten === -1) {
+        document.getElementById('extraInfoRow').style.display = 'block';
+        document.getElementById('extraFanSection').style.display = 'block';
+    } else {
+        document.getElementById('extraInfoRow').style.display = 'none';
+        document.getElementById('extraFanSection').style.display = 'none';
+    }
+    
+    if (d.shanten === -1) {
+        // Winning - breakdown shown above
+    } else if (d.waiting.length === 0) {
+        g.innerHTML = '<div style="color:#aaa;font-size:14px">暫無聽牌</div>';
+    } else {
+        const suits = { 'wan': [], 'tiao': [], 'tong': [], 'zi': [] };
+        d.waiting.forEach(w => {
+            const t = w.tile;
+            if (t.endsWith('m')) suits.wan.push(w);
+            else if (t.endsWith('s')) suits.tiao.push(w);
+            else if (t.endsWith('p')) suits.tong.push(w);
+            else suits.zi.push(w);
+        });
+
+        let html = '';
+        Object.keys(suits).forEach(suit => {
+            if (suits[suit].length === 0) return;
+            html += '<div style="display:flex;gap:6px;justify-content:center;margin:5px 0;flex-wrap:wrap;">';
+            suits[suit].forEach(w => {
+                html += '<div class="waiting-item ' + suit + '" onclick="showBreakdown(\'' + w.tile + '\', \'' + w.unicode + '\', ' + JSON.stringify(w.breakdown).replace(/"/g, '&quot;') + ', ' + w.fan + ')">';
+                html += '<span class="tc">' + w.unicode + '</span>';
+                html += '<span class="fan">' + w.fan + '番</span>';
+                html += '</div>';
+            });
+            html += '</div>';
+        });
+        g.innerHTML = html;
+    }
+
+    s.scrollIntoView({ behavior: 'smooth' });
+}
+
+// ===== 結果顯示 =====
+function showBreakdown(tile, unicode, breakdown, fan) {
+    if (breakdown && breakdown.length > 0) {
+        const msg = breakdown.map(b => b.name + ': ' + b.fan + '番').join('\n');
+        showModal('胡 ' + unicode + ' 的牌型:\n' + msg + '\n\n總番數: ' + fan + '番');
+    } else {
+        showModal('胡 ' + unicode + ': ' + fan + '番');
+    }
+}
+
+// ===== 彈窗 =====
+function showModal(content) {
+    document.getElementById('modalBody').innerHTML = content.replace(/\n/g, '<br>');
+    document.getElementById('modal').classList.add('show');
+}
+
+function closeModal() {
+    document.getElementById('modal').classList.remove('show');
+}
+
+// ===== 清除 =====
+// Change zhuang count
+function changeZhuang(delta) {
+    const input = document.getElementById('zhuangCount');
+    let val = parseInt(input.value) || 0;
+    val += delta;
+    if (val < 0) val = 0;
+    if (val > 99) val = 99;
+    input.value = val;
+    updateExtraInfo();
+}
+
+// Extra info: 莊, 自摸, 圈局
+let lastZimoState = false;  // Track previous zimo state
+
+function updateExtraInfo() {
+    let zhuangCount = parseInt(document.getElementById('zhuangCount').value) || 0;
+    const zimo = document.getElementById('chk_zimo') ? document.getElementById('chk_zimo').checked : false;
+    
+    // If zimo changed and we have a winning hand, re-calculate via API
+    if (zimo !== lastZimoState && currentBreakdown && currentBreakdown.length > 0 && handTiles.length > 0) {
+        lastZimoState = zimo;
+        calculate();  // Re-call API with new zimo state
+        return;
+    }
+    lastZimoState = zimo;
+    const quanWind = document.getElementById('quan_wind').value;
+    const weiWind = document.getElementById('wei_wind').value;
+    const hasWindSelected = (quanWind || weiWind);
+    const zhuangCheckbox = document.getElementById('chk_zhuang');
+    
+    // Update the shanten result text
+    const shantenEl = document.getElementById('shantenResult');
+    if (shantenEl && shantenEl.textContent.includes('已胡牌')) {
+        // Recalculate total
+        // Calculate base fan, excluding 風字坎 if wind is selected
+        let baseFan = 0;
+        for (const b of (currentBreakdown || [])) {
+            if (hasWindSelected && b.name === '風字坎') continue;  // Don't count 風字坎, will add new wind fan
+            baseFan += b.fan;
+        }
+        
+        let extra = 0;
+        // Add 莊 fan if checkbox checked
+        if (zhuangCheckbox && zhuangCheckbox.checked) {
+            extra += (2 * zhuangCount + 1);
+        }
+        // Add 自摸
+        if (zimo) extra += 1;
+        
+        // Add extra fan items
+        for (const item of extraFanList) {
+            extra += item.fan;
+        }
+        
+        const total = baseFan + extra;
+        
+        // Build info string (without 莊, it's in breakdown)
+        let info = [];
+        if (zimo) info.push('自摸');
+        if (quanWind && weiWind) info.push(quanWind + '圈' + weiWind + '位');
+        else if (quanWind) info.push(quanWind + '圈');
+        else if (weiWind) info.push(weiWind + '位');
+        
+        const infoStr = info.length > 0 ? ' (' + info.join('/') + ')' : '';
+        shantenEl.textContent = '🀄 已胡牌！總番數: ' + total + ' 番' + infoStr;
+        
+        // Update breakdown to show 自摸
+        renderExtraFanInBreakdown();
+    }
+}
+
+function toggleExtraFan() {
+    const content = document.getElementById('extraFanContent');
+    const icon = document.getElementById('extraFanToggleIcon');
+    if (content.style.display === 'none') {
+        content.style.display = 'block';
+        icon.textContent = '▲';
+    } else {
+        content.style.display = 'none';
+        icon.textContent = '▼';
+    }
+}
+
+// ============================================================
+// 牌型番數統一配置 (Centralized Fan Configuration)
+// ============================================================
+const FAN_CONFIG = {
+    // 基礎牌型 (from backend mj_calc.js)
+    "清一色": 80,
+    "混一色": 30,
+    "字一色": 120,
+    "大七門齊": 20,
+    "小七門齊": 15,
+    "七門齊": 15,
+    "五門齊": 5,
+    "斷幺": 10,
+    "缺一門": 10,
+    "門清": 5,
+    "坎坎胡": 100,
+    "五暗刻": 80,
+    "四暗刻": 30,
+    "三暗刻": 15,
+    "對對胡": 30,
+    "大三元": 40,
+    "小三元": 20,
+    "大四喜": 100,
+    "小四喜": 80,
+    "風字坎": 1,
+    "箭刻": 1,
+    "三般高": 10,
+    "一般高": 5,
+    "老少": 3,
+    "一色五步高(明)": 20,
+    "一色五步高(暗)": 35,
+    "一色四步高(明)": 15,
+    "一色四步高(暗)": 25,
+    "一色三步高(明)": 10,
+    "一色三步高(暗)": 20,
+    "一色二步高(明)": 8,
+    "一色二步高(暗)": 15,
+    "一色步步高(明)": 10,
+    "一色步步高(暗)": 20,
+    "三色五步高(明)": 20,
+    "三色五步高(暗)": 30,
+    "三色四步高(明)": 15,
+    "三色四步高(暗)": 20,
+    "三色三步高(明)": 8,
+    "三色三步高(暗)": 15,
+    "三色二步高(明)": 5,
+    "三色二步高(暗)": 10,
+    "三色步步高(明)": 5,
+    "三色步步高(暗)": 10,
+    "大三兄弟": 30,
+    "小三兄弟": 10,
+    "二兄弟": 5,
+    "六姊妹": 160,
+    "五姊妹": 60,
+    "大三姊妹": 15,
+    "四姊妹": 30,
+    "三姊妹": 8,
+    "兩姊妹": 5,
+    "三相逢": 10,
+    "二相逢": 2,
+    "同款七連對": 80,
+    "同款六連對": 40,
+    "同款五連對": 20,
+    "同款四連對": 10,
+    "同款三連對": 5,
+    "五同順": 40,
+    "四同順": 20,
+    "十二歸一(明)": 60,
+    "十二歸一(暗)": 120,
+    "十二歸四(明)": 60,
+    "八歸一(明)": 15,
+    "八歸一(暗)": 30,
+    "八歸四(明)": 30,
+    "四歸一(明)": 5,
+    "四歸一(暗)": 10,
+    "清么九": 80,
+    "混么九": 30,
+    "不搭三相逢": 20,
+    "四槓": 30,
+    "三槓": 15,
+    "二槓": 5,
+    "一槓": 1,
+    "正花": 1,
+    "無字花": 5,
+    "海底撈月": 10,
+    "河底撈魚": 20,
+    "將眼": 1,
+    "自摸": 1,
+    "莊": 1,
+    
+    // 額外牌型 (追加番數)
+    "天聽": 5,
+    "地聽": 3,
+    "人聽": 2,
+    "搶槓": 8,
+    "槓上花": 8,
+    "連莊": 1,
+};
+
+// 風牌番數配置
+const WIND_FAN = {
+    "爛風": 1,   // 唔中圈亦唔中位
+    "正風": 2,   // 中圈或中位
+    "雙番": 4,   // 中圈又中位
+};
+
+// ============================================================
+// Extra fan items mapping (using FAN_CONFIG)
+// ============================================================
+const EXTRA_FAN_ITEMS = {
+    // 原有
+    'chk_haidi': { name: '海底撈月', fan: FAN_CONFIG['海底撈月'] || 10 },
+    'chk_heidi': { name: '河底撈魚', fan: FAN_CONFIG['河底撈魚'] || 20 },
+    'chk_tianti': { name: '天聽', fan: FAN_CONFIG['天聽'] || 5 },
+    'chk_diti': { name: '地聽', fan: FAN_CONFIG['地聽'] || 3 },
+    'chk_renti': { name: '人聽', fan: FAN_CONFIG['人聽'] || 2 },
+    'chk_qianggang': { name: '搶槓', fan: FAN_CONFIG['搶槓'] || 8 },
+    'chk_gangshang': { name: '槓上花', fan: FAN_CONFIG['槓上花'] || 8 },
+    // 新增 - 特殊胡牌
+    'chk_tianhu': { name: '天胡', fan: FAN_CONFIG['天胡'] || 50 },
+    'chk_dihu': { name: '地胡', fan: FAN_CONFIG['地胡'] || 30 },
+    'chk_tianfan': { name: '天糊', fan: FAN_CONFIG['天糊'] || 50 },
+    // 新增 - 搶槓類
+    'chk_yiqiangqi': { name: '一搶七', fan: FAN_CONFIG['一搶七'] || 8 },
+    'chk_qiqiangyi': { name: '七搶一', fan: FAN_CONFIG['七搶一'] || 10 },
+    // 新增 - 自摸類
+    'chk_huashangzimo': { name: '花上自摸', fan: FAN_CONFIG['花上自摸'] || 8 },
+    'chk_gangshangzimo': { name: '槓上自摸', fan: FAN_CONFIG['槓上自摸'] || 8 },
+    'chk_gangshanggangzimo': { name: '槓上槓自摸', fan: FAN_CONFIG['槓上槓自摸'] || 16 },
+    'chk_tingpaijishi': { name: '聽牌即食', fan: FAN_CONFIG['聽牌即食'] || 2 },
+    // 新增 - 內子類
+    'chk_sizinei': { name: '四只內', fan: FAN_CONFIG['四只內'] || 20 },
+    'chk_qizinei': { name: '七只內', fan: FAN_CONFIG['七只內'] || 30 },
+    'chk_shizinei': { name: '十只內', fan: FAN_CONFIG['十只內'] || 40 },
+    // 新增 - 響類
+    'chk_shuangxiang': { name: '雙響', fan: FAN_CONFIG['雙響'] || 5 },
+    'chk_sanxiang': { name: '三響', fan: FAN_CONFIG['三響'] || 10 },
+    'chk_shuangxiangbaochou': { name: '雙響報仇', fan: FAN_CONFIG['雙響報仇'] || 10 },
+    'chk_sanxiangbaochou': { name: '三響報仇', fan: FAN_CONFIG['三響報仇'] || 20 },
+    // 新增 - 聽牌
+    'chk_tingpai': { name: '聽牌', fan: FAN_CONFIG['聽牌'] || 1 },
+};
+
+let extraFanList = []; // Store selected extra fan items
+
+function updateExtraFan() {
+    extraFanList = [];
+    
+    for (const [id, item] of Object.entries(EXTRA_FAN_ITEMS)) {
+        const checkbox = document.getElementById(id);
+        if (checkbox && checkbox.checked) {
+            extraFanList.push(item);
+        }
+    }
+    
+    // Update display if we're in edit mode or showing results
+    renderExtraFanInBreakdown();
+}
+
+function renderExtraFanInBreakdown() {
+    // Find the fan-list element
+    const fanListEl = document.querySelector('.fan-list');
+    if (!fanListEl) return;
+    
+    // Get current HTML
+    let html = fanListEl.innerHTML;
+    
+    // Remove any existing extra fan tags first (but keep the original breakdown)
+    // We'll rebuild from currentBreakdown + extra items
+    const existingBreakdown = currentBreakdown || [];
+    
+    // Rebuild HTML with 自摸 + extra items (filter out 風字坎 if wind selected)
+    html = '';
+    
+    // Check if 圈/位 selected
+    const quanWind = document.getElementById('quan_wind').value;
+    const weiWind = document.getElementById('wei_wind').value;
+    const hasWindSelected = (quanWind || weiWind);
+    
+    // Add original breakdown items (remove 風字坎 if wind selected)
+    let originalFanTotal = 0;
+    for (const b of existingBreakdown) {
+        if (hasWindSelected && b.name === '風字坎') continue;  // Skip 風字坎, will replace with new calculation
+        html += '<span class="fan-tag">' + b.name + '<span class="fan-num">' + b.fan + '</span></span>';
+        originalFanTotal += b.fan;
+    }
+    
+    // Add 莊 if checkbox is checked
+    const zhuangCheckbox = document.getElementById('chk_zhuang');
+    const zhuangCount = parseInt(document.getElementById('zhuangCount').value) || 0;
+    if (zhuangCheckbox && zhuangCheckbox.checked) {
+        const zhuangFan = (2 * zhuangCount + 1);
+        html += '<span class="fan-tag" data-extra="true">莊<span class="fan-num">' + zhuangFan + '</span></span>';
+    }
+    
+    // Add 自摸 if checked
+    const zimoCheckbox = document.getElementById('chk_zimo');
+    if (zimoCheckbox && zimoCheckbox.checked) {
+        html += '<span class="fan-tag" data-extra="true">自摸<span class="fan-num">1</span></span>';
+    }
+    
+    // Add 風牌 items based on actual wind pongs in hand
+    if (hasWindSelected) {
+        const windCounts = { '東': 0, '南': 0, '西': 0, '北': 0 };
+        for (const t of handTiles) {
+            if (t === '1z') windCounts['東']++;
+            if (t === '2z') windCounts['南']++;
+            if (t === '3z') windCounts['西']++;
+            if (t === '4z') windCounts['北']++;
+        }
+        
+        for (const [wind, count] of Object.entries(windCounts)) {
+            if (count >= 3) {  // Has pong
+                let fengFan = 1;
+                
+                if (quanWind && weiWind) {
+                    if (quanWind === wind && weiWind === wind) {
+                        fengFan = 4;  // 雙番
+                    } else if (quanWind === wind || weiWind === wind) {
+                        fengFan = 2;  // 正風
+                    }
+                } else if (quanWind || weiWind) {
+                    if (quanWind === wind || weiWind === wind) {
+                        fengFan = 2;  // 正風
+                    }
+                }
+                
+                if (fengFan === 1) {
+                    html += '<span class="fan-tag" data-extra="true">爛風' + wind + '<span class="fan-num">' + fengFan + '</span></span>';
+                } else if (fengFan === 2) {
+                    html += '<span class="fan-tag" data-extra="true">正風' + wind + '<span class="fan-num">' + fengFan + '</span></span>';
+                } else if (fengFan === 4) {
+                    html += '<span class="fan-tag" data-extra="true">雙番' + wind + '<span class="fan-num">' + fengFan + '</span></span>';
+                }
+            }
+        }
+    }
+    
+    // Add other extra fan items (海底撈月 etc)
+    for (const item of extraFanList) {
+        html += '<span class="fan-tag" data-extra="true">' + item.name + '<span class="fan-num">' + item.fan + '</span></span>';
+    }
+    
+    fanListEl.innerHTML = html;
+    
+    // Update total fan display
+    updateTotalFanWithExtra();
+}
+
+function updateTotalFanWithExtra() {
+    // Calculate base fan from currentBreakdown
+    let baseFan = 0;
+    for (const b of currentBreakdown) {
+        baseFan += b.fan;
+    }
+    
+    // Add 莊 if checked
+    const zhuangCheckbox = document.getElementById('chk_zhuang');
+    const zhuangCount = parseInt(document.getElementById('zhuangCount').value) || 0;
+    if (zhuangCheckbox && zhuangCheckbox.checked) {
+        baseFan += (2 * zhuangCount + 1);
+    }
+    
+    // Add 自摸 if checked
+    const zimoCheckbox = document.getElementById('chk_zimo');
+    if (zimoCheckbox && zimoCheckbox.checked) {
+        baseFan += 1;
+    }
+    
+    // Add 風牌 fan based on actual wind pongs
+    const quanWind = document.getElementById('quan_wind').value;
+    const weiWind = document.getElementById('wei_wind').value;
+    const hasWindSelected = (quanWind || weiWind);
+    
+    if (hasWindSelected) {
+        const windCounts = { '東': 0, '南': 0, '西': 0, '北': 0 };
+        for (const t of handTiles) {
+            if (t === '1z') windCounts['東']++;
+            if (t === '2z') windCounts['南']++;
+            if (t === '3z') windCounts['西']++;
+            if (t === '4z') windCounts['北']++;
+        }
+        
+        for (const [wind, count] of Object.entries(windCounts)) {
+            if (count >= 3) {
+                let fengFan = 1;
+                if (quanWind && weiWind) {
+                    if (quanWind === wind && weiWind === wind) fengFan = 4;
+                    else if (quanWind === wind || weiWind === wind) fengFan = 2;
+                } else if (quanWind || weiWind) {
+                    if (quanWind === wind || weiWind === wind) fengFan = 2;
+                }
+                baseFan += fengFan;
+            }
+        }
+    }
+    
+    // Add other extra fan items
+    for (const item of extraFanList) {
+        baseFan += item.fan;
+    }
+    
+    const totalFan = baseFan;
+    
+    // Update the total display
+    const shantenEl = document.getElementById('shantenResult');
+    if (shantenEl && shantenEl.textContent.includes('總番數')) {
+        shantenEl.textContent = '🀄 已胡牌！總番數: ' + totalFan + ' 番';
+    }
+}
+
+function clearAll() {
+    openTiles = [];
+    handTiles = [];
+    document.getElementById('resultSection').classList.remove('show');
+    document.getElementById('extraInfoRow').style.display = 'none';
+    document.getElementById('extraFanSection').style.display = 'none';
+    
+    // Reset extra info checkboxes
+    document.getElementById('zhuangCount').value = 0;
+    document.getElementById('chk_zimo').checked = false;
+    document.getElementById('quan_wind').value = '';
+    document.getElementById('wei_wind').value = '';
+    
+    // Reset extra fan checkboxes
+    extraFanList = [];
+    for (const id of Object.keys(EXTRA_FAN_ITEMS)) {
+        const checkbox = document.getElementById(id);
+        if (checkbox) checkbox.checked = false;
+    }
+    
+    updateDisplay();
+}
+
+// ========== Debug Mode with Checkboxes ==========
+// false removed
+let currentDetectedPatterns = [];
+
+
+// ===== 牌型分類 =====
+const PATTERN_CATEGORIES = {
+    // 花字類 (庭芳)
+    "花字類": ["一台花", "有花", "正花", "無花", "風牌", "無字", "正圈風牌", "正位風牌", "三元牌", "無字花", "花上自摸"],
+    
+    // 叮牌類
+    "叮牌類": ["叮牌", "即食", "天聽", "地聽"],
+    
+    // 拉莊類
+    "拉莊類": ["莊", "連莊"],
+    
+    // 胡牌型式類
+    "胡牌型式類": ["假獨", "對碰", "獨獨"],
+    
+    // 平胡類
+    "平胡類": ["平胡", "無字花平胡", "自摸", "花上自摸", "槓上自摸"],
+    
+    // 最後糊牌類
+    "最後糊牌類": ["海底撈月", "河底撈魚"],
+    
+    // 一炮多響類
+    "一炮多響類": ["雙響", "三響"],
+    
+    // 缺類
+    "缺類": ["斷幺", "無字缺五", "缺一門"],
+    
+    // 門齊類
+    "門齊類": ["小五門齊", "大五門齊", "小七門齊", "大七門齊"],
+    
+    // 同順類
+    "同順類": ["姊妹", "般高", "三相逢"],
+    
+    // 步高類
+    "步高類": ["三色步步高(明)", "三色步步高(暗)", "一色步步高(明)", "一色步步高(暗)",
+               "三色二步高(明)", "三色二步高(暗)", "一色二步高(明)", "一色二步高(暗)",
+               "三色三步高(明)", "三色三步高(暗)", "一色三步高(明)", "一色三步高(暗)",
+               "三色四步高(明)", "三色四步高(暗)", "一色四步高(明)", "一色四步高(暗)",
+               "三色五步高(明)", "三色五步高(暗)", "一色五步高(明)", "一色五步高(暗)"],
+    
+    // 老少類
+    "老少類": ["老少", "老少刻"],
+    
+    // 對對胡
+    "對對胡類": ["對對胡"],
+    
+    // 同刻類
+    "同刻類": ["兄弟", "小三兄弟", "大三兄弟"],
+    
+    // 連刻類
+    "連刻類": ["兩連刻", "小三連刻", "三連刻", "小四連刻", "四連刻", "小五連刻", "五連刻"],
+    
+    // 暗刻類
+    "暗刻類": ["兩暗刻", "三暗刻", "四暗刻", "五暗刻", "坎坎胡"],
+    
+    // 槓類
+    "槓類": ["搶槓", "一槓", "二槓", "三槓", "四槓", "五槓"],
+    
+    // 歸類
+    "歸類": ["四歸一(明)", "四歸一(暗)", "四歸二(明)", "四歸二(暗)", "四歸四(明)", "四歸四(暗)"],
+    
+    // 風牌類
+    "風牌類": ["小三風", "大三風", "小四喜", "大四喜"],
+    
+    // 元牌類
+    "元牌類": ["小三元", "大三元"],
+    
+    // 求人類
+    "求人類": ["門清", "不求人", "半求人", "全求人"],
+    
+    // 速度類
+    "速度類": ["天胡", "地胡", "人胡", "四子", "七子", "十子"],
+    
+    // 嚦咕類
+    "嚦咕類": ["嚦咕", "正嚦咕"],
+    
+    // 十六不搭類
+    "十六不搭類": ["十六不搭", "十六不搭十六面聽", "十六不搭三相逢", "正十六不搭"],
+    
+    // 十三幺類
+    "十三幺類": ["十三幺", "十三幺十三面聽"],
+    
+    // 一色類
+    "一色類": ["混一色", "清一色", "綠一色", "字一色"],
+    
+    // 幺九類
+    "幺九類": ["混全帶幺", "清全帶幺", "混幺", "清幺"],
+    
+    // 其他
+    "其他": ["將眼", "絕絕", "二數", "三數", "風字坎", "箭刻", ]
+};
+
+// ===== Debug模式 =====
+function toggleDebugMode() {
+    // false removed
+    const panel = document.getElementById('debugPanel');
+    const btn = document.getElementById('debugBtn');
+    const saveBtn = document.getElementById('saveBtn');
+    
+    if (false) {
+        panel.style.display = 'block';
+        btn.classList.add('active');
+        saveBtn.style.display = 'inline-block';
+        populatePatternCheckboxes();
+    } else {
+        panel.style.display = 'none';
+        btn.classList.remove('active');
+        saveBtn.style.display = 'none';
+    }
+}
+
+function populatePatternCheckboxes() {
+    const container = document.getElementById('patternCheckboxes');
+    container.innerHTML = '';
+    
+    for (const [category, patterns] of Object.entries(PATTERN_CATEGORIES)) {
+        const fieldset = document.createElement('fieldset');
+        fieldset.innerHTML = `<legend>${category}</legend>`;
+        
+        for (const p of patterns) {
+            const label = document.createElement('label');
+            label.className = 'checkbox-label';
+            label.innerHTML = `<input type="checkbox" value="${p}" onchange="onCheckboxChange()"> ${p}`;
+            fieldset.appendChild(label);
+        }
+        container.appendChild(fieldset);
+    }
+}
+
+// Called when user changes any checkbox
+function onCheckboxChange() {
+    const checkboxes = document.querySelectorAll('#patternCheckboxes input[type="checkbox"]');
+    const selected = [];
+    checkboxes.forEach(cb => {
+        if (cb.checked) selected.push(cb.value);
+    });
+    
+    renderDisplayedPatterns(selected);
+}
+
+// Render patterns to display area
+function renderDisplayedPatterns(patterns) {
+    const detectedDiv = document.getElementById('detectedPatterns');
+    if (patterns.length === 0) {
+        detectedDiv.innerHTML = '<span class="no-pattern">無</span>';
+    } else {
+        detectedDiv.innerHTML = patterns.map(p => 
+            `<span class="detected-tag" title="點擊移除" onclick="removePatternByName('${p}')">${p} ×</span>`
+        ).join(' ');
+    }
+}
+
+function removePatternByName(name) {
+    const checkboxes = document.querySelectorAll('#patternCheckboxes input[type="checkbox"]');
+    checkboxes.forEach(cb => {
+        if (cb.value === name) cb.checked = false;
+    });
+    onCheckboxChange();
+}
+
+function filterPatterns(searchTerm) {
+    const labels = document.querySelectorAll('#patternCheckboxes label');
+    labels.forEach(label => {
+        const text = label.textContent.toLowerCase();
+        label.style.display = text.includes(searchTerm.toLowerCase()) ? "inline-block" : "none";
+    });
+}
+
+// Update from server calculation
+// ===== Pattern Detection UI =====
+function updateDetectedPatterns(patterns) {
+    const checkboxes = document.querySelectorAll('#patternCheckboxes input[type="checkbox"]');
+    checkboxes.forEach(cb => {
+        cb.checked = patterns.includes(cb.value);
+    });
+    onCheckboxChange();
+}
+
+function savePatternExample() {
+    const allTiles = [...openTiles, ...handTiles];
+    if (allTiles.length < 14) { alert('請輸入至少14張牌！'); return; }
+    
+    // Get currently checked patterns
+    const checkboxes = document.querySelectorAll('#patternCheckboxes input[type="checkbox"]:checked');
+    const selectedPatterns = Array.from(checkboxes).map(cb => cb.value);
+    
+    if (selectedPatterns.length === 0) { alert('請至少選擇一個牌型！'); return; }
+    
+    // Get self-draw status
+    const isZimo = document.getElementById('zimoToggle').checked;
+    
+    // If self-draw, add "自摸" to patterns
+    let patternsToSave = [...selectedPatterns];
+    if (isZimo && !patternsToSave.includes('自摸')) {
+        patternsToSave.push('自摸');
+    }
+    
+    let saved = 0;
+    patternsToSave.forEach(pattern => {
+        fetch('/save_example', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                pattern: pattern, 
+                open_tiles: openTiles,
+                hand_tiles: handTiles,
+                is_zimo: isZimo
+            })
+        }).then(r => r.json()).then(data => {
+            saved++;
+            if (saved === patternsToSave.length) alert(`已儲存 ${saved} 個牌型案例！`);
+        });
+    });
+}
+
+// ===== 計算劫持 =====
+const originalCalculate = calculate;
+calculate = function() {
+    originalCalculate();
+    if (false) {
+        const allTiles = [...openTiles, ...handTiles];
+        fetch('/calc', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({hand: allTiles, open: [], mode: 16})})
+        .then(r => r.json()).then(result => {
+            if (result.shanten === -1) updateDetectedPatterns(result.winning_breakdown.map(p => p.name));
+            else updateDetectedPatterns([]);
+        });
+    }
+};
+
+init();
+
+// Edit Fan Mode
+let editFanMode = false;
+let originalBreakdown = [];  // For cancel
+let currentBreakdown = [];
+
+// ===== 編輯番數 =====
+function toggleEditFan() {
+    editFanMode = !editFanMode;
+    const btn = document.getElementById('editFanBtn');
+    const grid = document.getElementById('waitingGrid');
+    
+    if (editFanMode) {
+        // Add extra fan items to currentBreakdown before entering edit mode
+        const zhuangCheckbox = document.getElementById('chk_zhuang');
+        const zhuangCount = parseInt(document.getElementById('zhuangCount').value) || 0;
+        if (zhuangCheckbox && zhuangCheckbox.checked) {
+            const zhuangFan = 2 * zhuangCount + 1;
+            currentBreakdown.push({name: '莊', fan: zhuangFan});
+        }
+        const zimoCheckbox = document.getElementById('chk_zimo');
+        if (zimoCheckbox && zimoCheckbox.checked) {
+            currentBreakdown.push({name: '自摸', fan: 1});
+        }
+        // Add extra fan items
+        for (const item of extraFanList) {
+            currentBreakdown.push({name: item.name, fan: item.fan});
+        }
+        
+        // Save original breakdown for cancel
+        originalBreakdown = currentBreakdown.map(b => ({name: b.name, fan: b.fan}));
+        // button stays as is in edit mode
+        grid.classList.add('edit-mode');
+        renderEditFanUI();
+    } else {
+        btn.textContent = '✏️ 編輯番數';
+        grid.classList.remove('edit-mode');
+    }
+}
+
+function renderEditFanUI() {
+    const grid = document.getElementById('waitingGrid');
+    let html = '<div class="fan-list">';
+    let total = 0;
+    for (let i = 0; i < currentBreakdown.length; i++) {
+        const b = currentBreakdown[i];
+        total += b.fan;
+        html += '<span class="fan-tag" onclick="deleteFan(' + i + ')">' + b.name + 
+                '<input type="number" class="fan-num" value="' + b.fan + '" onclick="event.stopPropagation()" onchange="updateFan(' + i + ', this.value)"></span>';
+    }
+    html += '</div>';
+    html += '<div style="margin-top:15px;padding-top:10px;border-top:1px solid #ccc;text-align:center;">';
+    html += '<button onclick="showAddPattern()" style="padding:8px 16px;background:#3498db;color:#fff;border:none;border-radius:4px;cursor:pointer;margin:3px;">➕ 添加</button>';
+    html += '<button onclick="saveEditFan()" style="padding:8px 16px;background:#27ae60;color:#fff;border:none;border-radius:4px;cursor:pointer;margin:3px;">✅ 完成&保存</button>';
+    html += '<button onclick="cancelEditFan()" style="padding:8px 16px;background:#e74c3c;color:#fff;border:none;border-radius:4px;cursor:pointer;margin:3px;">取消修改</button>';
+    html += '</div>';
+    grid.innerHTML = html;
+}
+
+function deleteFan(index) {
+    currentBreakdown.splice(index, 1);
+    renderEditFanUI();
+}
+
+function updateFan(index, newFan) {
+    currentBreakdown[index].fan = parseInt(newFan) || 0;
+    let total = currentBreakdown.reduce((sum, b) => sum + b.fan, 0);
+    document.getElementById('editTotalFan').textContent = total;
+}
+
+
+function saveEditFan() {
+    editFanMode = false;
+    document.getElementById('editFanBtn').textContent = '✏️ 編輯番數';
+    document.getElementById('waitingGrid').classList.remove('edit-mode');
+    
+    // Save changes to fan config - send ALL patterns from current breakdown
+    const updates = {};
+    for (const b of currentBreakdown) {
+        updates[b.name] = b.fan;
+    }
+    
+    // Send to backend to merge with existing config
+    fetch('/api/fan_config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: 'default', patterns: updates})
+    }).then(r => r.json()).then(data => {
+        console.log('Fan config updated:', data);
+    });
+    
+    // Update display
+    const bdHtml = currentBreakdown.map(b => 
+        '<span class="fan-tag">' + b.name + '<span class="fan-num">' + b.fan + '</span></span>'
+    ).join('');
+    document.getElementById('waitingGrid').innerHTML = '<div class="fan-list">' + bdHtml + '</div>';
+    
+    // Update total fan display
+    updateTotalFanWithExtra();
+}
+
+// Default fan values for patterns
+const DEFAULT_FAN = {
+    "門清": 5, "不求人": 5, "自摸": 1, "場風": 1, "門風": 1, "花牌": 1, "平胡": 2, "碰碰胡": 6,
+    "大三元": 30, "小三元": 20, "清一色": 30, "混一色": 15, "字一色": 30,
+    "四暗刻": 50, "五暗刻": 80, "大四喜": 40, "小四喜": 30, "九連寶燈": 40,
+    "副露": 0, "河底撈魚": 8, "海底撈月": 8, "搶槓": 8, "槓上花": 8,
+    "七對子": 10, "全帶幺": 5, "斷幺": 5, "三色同順": 10, "三色同刻": 20,
+    "一色二步高": 5, "一色三步高(明)": 10, "一色三步高(暗)": 20, "一色步步高": 10,
+    "三色步步高(明)": 5, "三色步步高(暗)": 10, "三色二步高(明)": 3, "三色二步高(暗)": 5,
+    "三色三步高(明)": 8, "三色三步高(暗)": 15,
+    "對對胡": 6, "三暗刻": 5, "三槓": 15, "天胡": 50, "地胡": 30, "人胡": 20,
+    "東風": 1, "南風": 1, "西風": 1, "北風": 1, "中": 1, "發": 1, "白": 1,
+    "春": 1, "夏": 1, "秋": 1, "冬": 1, "梅": 1, "蘭": 1, "菊": 1, "竹": 1,
+    "缺一門": 10, "老少": 3, "二相逢": 2, "三相逢": 10
+};
+
+function showAddPattern() {
+    const allPatterns = [
+        "門清","不求人","自摸","場風","門風","花牌","平胡","碰碰胡","大三元","小三元",
+        "清一色","混一色","字一色","四暗刻","五暗刻","大四喜","小四喜","九連寶燈","副露",
+        "河底撈魚","海底撈月","搶槓","槓上花","七對子","全帶幺","斷幺","三色同順","三色同刻",
+        "一色二步高","一色三步高","一色步步高","三色步步高","三色二步高","三色三步高",
+        "雜龍","對對胡","三暗刻","三槓","天胡","地胡","人胡","東風","南風","西風","北風",
+        "中","發","白","春","夏","秋","冬","梅","蘭","菊","竹"
+    ];
+    const existing = currentBreakdown.map(b => b.name);
+    const available = allPatterns.filter(p => !existing.includes(p));
+    
+    // Use dropdown instead of prompt, with onchange to auto-fill fan
+    let html = '<select id="patternSelect" onchange="autoFillFan(this.value)" style="padding:5px;margin:5px;"><option value="">選擇牌型...</option>';
+    available.forEach(p => {
+        html += '<option value="' + p + '">' + p + '</option>';
+    });
+    html += '</select>';
+    html += '<input type="number" id="fanNumInput" placeholder="番數" style="width:50px;padding:5px;">';
+    html += '<button onclick="addPatternFromSelect()" style="padding:5px 10px;background:#3498db;color:#fff;border:none;border-radius:4px;">確認添加</button>';
+    
+    // Replace the button area temporarily
+    document.getElementById('waitingGrid').innerHTML = '<div class="fan-list">' + 
+        currentBreakdown.map((b, i) => '<span class="fan-tag" onclick="deleteFan(' + i + ')">' + b.name + 
+        '<input type="number" class="fan-num" value="' + b.fan + '" onclick="event.stopPropagation()" onchange="updateFan(' + i + ', this.value)"></span>').join('') + 
+        '</div><div style="margin-top:15px;text-align:center;">' + html + 
+        '<button onclick="renderEditFanUI()" style="margin-left:10px;padding:5px 12px;background:#95a5a6;color:#fff;border:none;border-radius:4px;cursor:pointer;">返回</button></div>';
+}
+
+function autoFillFan(patternName) {
+    const input = document.getElementById('fanNumInput');
+    if (patternName && DEFAULT_FAN[patternName] !== undefined) {
+        input.value = DEFAULT_FAN[patternName];
+    }
+}
+
+function addPatternFromSelect() {
+    const select = document.getElementById('patternSelect');
+    const input = document.getElementById('fanNumInput');
+    const name = select.value;
+    const fan = parseInt(input.value);
+    
+    if (!name) {
+        alert('請選擇牌型！');
+        return;
+    }
+    if (isNaN(fan) || fan <= 0) {
+        alert('請輸入有效番數！');
+        return;
+    }
+    
+    currentBreakdown.push({name: name, fan: fan});
+    renderEditFanUI();
+}
+
+function cancelEditFan() {
+    editFanMode = false;
+    document.getElementById('editFanBtn').textContent = '✏️ 編輯番數';
+    document.getElementById('waitingGrid').classList.remove('edit-mode');
+    // Restore original breakdown (discard changes)
+    currentBreakdown = originalBreakdown.map(b => ({name: b.name, fan: b.fan}));
+    // Re-render original display
+    const bdHtml = currentBreakdown.map(b => 
+        '<span class="fan-tag">' + b.name + '<span class="fan-num">' + b.fan + '</span></span>'
+    ).join('');
+    document.getElementById('waitingGrid').innerHTML = '<div class="fan-list">' + bdHtml + '</div>';
+}
+
+
+// ===== 組合顯示 =====
+function showCombo(idx) {
+    var dataEl = document.getElementById('comboData');
+    var displayEl = document.getElementById('comboDisplay');
+    if (!dataEl || !displayEl) return;
+    
+    try {
+        var combos = JSON.parse(dataEl.innerHTML);
+        var combo = combos[idx];
+        if (!combo || !combo.breakdown) return;
+        
+        var html = '<div class="fan-list">';
+        for (var i = 0; i < combo.breakdown.length; i++) {
+            var b = combo.breakdown[i];
+            html = html + '<span class="fan-tag">' + b.name + '<span class="fan-num">' + b.fan + '</span></span>';
+        }
+        html = html + '</div>';
+        displayEl.innerHTML = html;
+    } catch(e) {}
+}
+</script>
+
+
+<!-- Fan Settings Modal -->
+<div class="modal" id="fanSettingsModal" style="display:none;">
+    <div class="modal-content" style="max-width:800px; max-height:90vh; overflow-y:auto;">
+        <span class="modal-close" onclick="closeFanSettings()">&times;</span>
+        <h2 style="text-align:center; color:#333;">⚙️ 番數設定</h2>
+        
+        <div style="margin:15px 0; padding:10px; background:#f8f9fa; border-radius:8px;">
+            <label style="font-weight:bold; color:#333;">📁 選擇番種配置：</label>
+            <select id="presetSelect" onchange="loadPreset()" style="padding:8px 12px; margin-left:10px; border-radius:5px; min-width:140px; border:2px solid #3498db; background:#fff; font-weight:bold; color:#2c3e50; cursor:pointer;">
+                <option value="default">預設</option>
+            </select>
+            <button onclick="addNewPreset()" style="padding:8px 15px; margin-left:10px; background:#3498db; color:#fff; border:none; border-radius:5px; cursor:pointer;">➕ 添加番種</button>
+            <button onclick="deletePreset()" style="padding:8px 15px; margin-left:5px; background:#e74c3c; color:#fff; border:none; border-radius:5px; cursor:pointer;">🗑️ 刪除番種</button>
+            <button onclick="savePreset()" style="padding:8px 15px; margin-left:10px; background:#27ae60; color:#fff; border:none; border-radius:5px; cursor:pointer;">💾 保存當前</button>
+        </div>
+        
+        <div id="fanSettingsContent" style="padding:10px;">
+            <!-- Fan settings will be loaded here -->
+        </div>
+    </div>
+</div>
+
+<script>
+// Fan Settings Functions
+let currentPresetId = 'default'; // Remember selected preset
+
+function showFanSettings() {
+    loadPresetsList();
+    document.getElementById('fanSettingsModal').style.display = 'block';
+    // Load the currently selected preset, not always default
+    setTimeout(() => {
+        document.getElementById('presetSelect').value = currentPresetId;
+        loadPreset();
+    }, 100);
+}
+
+function closeFanSettings() {
+    document.getElementById('fanSettingsModal').style.display = 'none';
+}
+
+function loadPresetsList() {
+    fetch('/api/fan_presets')
+        .then(r => r.json())
+        .then(presets => {
+            const select = document.getElementById('presetSelect');
+            select.innerHTML = '';
+            presets.forEach(p => {
+                const opt = document.createElement('option');
+                opt.value = p.id;
+                opt.textContent = p.name;
+                select.appendChild(opt);
+            });
+        });
+}
+
+function loadPreset() {
+    const presetId = document.getElementById('presetSelect').value;
+    currentPresetId = presetId; // Remember selection
+    fetch('/api/fan_preset/' + presetId)
+        .then(r => r.json())
+        .then(data => {
+            displayFanSettings(data.patterns || {});
+            // Update currentFanConfig and refresh extra fan checkboxes
+            if (data.patterns) {
+                currentFanConfig = data.patterns;
+                // Update EXTRA_FAN_ITEMS with new values
+                for (const [key, item] of Object.entries(EXTRA_FAN_ITEMS)) {
+                    if (currentFanConfig[item.name] !== undefined) {
+                        item.fan = currentFanConfig[item.name];
+                    }
+                }
+                // Refresh extra fan checkboxes
+                renderExtraFanCheckboxes();
+            }
+        });
+}
+
+function loadFanSettings() {
+    fetch('/api/fan_config')
+        .then(r => r.json())
+        .then(config => {
+            // Load first preset by default
+            const firstKey = Object.keys(config)[0];
+            if (firstKey) {
+                const patterns = config[firstKey].patterns || {};
+                displayFanSettings(patterns);
+                // Update currentFanConfig and refresh extra fan checkboxes
+                currentFanConfig = patterns;
+                for (const [key, item] of Object.entries(EXTRA_FAN_ITEMS)) {
+                    if (currentFanConfig[item.name] !== undefined) {
+                        item.fan = currentFanConfig[item.name];
+                    }
+                }
+                renderExtraFanCheckboxes();
+            }
+        });
+}
+
+function displayFanSettings(patterns) {
+    const container = document.getElementById('fanSettingsContent');
+    
+    // Group all patterns from fan_config dynamically
+    const allPatterns = Object.keys(patterns).sort();
+    
+    // Define categories with prefixes (patterns starting with these will be grouped)
+    const categoryPrefixes = {
+        "一色類": ["清一色", "混一色", "字一色"],
+        "門齊類": ["大七門齊", "小七門齊", "七門齊", "五門齊"],
+        "斷缺類": ["斷幺", "缺一門"],
+        "門清": ["門清"],
+        "暗刻類": ["坎坎胡", "五暗刻", "四暗刻", "三暗刻", "對對胡"],
+        "三元類": ["大三元", "小三元"],
+        "風牌類": ["大四喜", "小四喜", "風字坎", "箭刻"],
+        "般高類": ["三般高", "一般高"],
+        "老少": ["老少"],
+        "步高類": ["一色", "三色"],
+        "兄弟類": ["大三兄弟", "小三兄弟", "二兄弟"],
+        "姊妹類": ["六姊妹", "五姊妹", "大三姊妹", "四姊妹", "三姊妹", "兩姊妹"],
+        "相逢類": ["相逢"],
+        "同款類": ["同款"],
+        "同順類": ["同順"],
+        "歸類": ["歸"],
+        "么九類": ["么九"],
+        "特殊牌型": ["不搭"],
+        "槓類": ["槓"],
+        "花牌類": ["花"],
+        "特殊胡牌": ["天胡", "地胡", "海底撈月", "河底撈魚"],
+        "聽牌類": ["天聽", "地聽", "人聽", "聽牌"],
+        "搶槓類": ["搶槓", "一搶七", "七搶一"],
+        "自摸類": ["槓上", "花上自摸"],
+        "內子類": ["只內"],
+        "響類": ["響"],
+        "風類": ["爛風", "正風", "雙番"],
+        "其他": []
+    };
+    
+    // Group patterns by category
+    const grouped = {};
+    const ungrouped = [];
+    
+    for (const pattern of allPatterns) {
+        let placed = false;
+        for (const [cat, prefixes] of Object.entries(categoryPrefixes)) {
+            for (const prefix of prefixes) {
+                if (pattern.startsWith(prefix) || pattern.includes(prefix)) {
+                    if (!grouped[cat]) grouped[cat] = [];
+                    grouped[cat].push(pattern);
+                    placed = true;
+                    break;
+                }
+            }
+            if (placed) break;
+        }
+        if (!placed) {
+            ungrouped.push(pattern);
+        }
+    }
+    
+    // Add ungrouped to "其他"
+    if (ungrouped.length > 0) {
+        grouped["其他"] = ungrouped;
+    }
+    
+    let html = '';
+    for (const [cat, items] of Object.entries(grouped)) {
+        html += '<h3 style="color:#2c3e50; border-bottom:2px solid #3498db; padding:8px 0; margin-top:25px; margin-bottom:10px; font-size:16px;">📋 ' + cat + '</h3>';
+        html += '<div style="display:flex; flex-wrap:wrap; gap:10px;">';
+        for (const item of items) {
+            const fan = patterns[item] || 0;
+            html += '<div style="display:flex; align-items:center; background:#f8f9fa; padding:8px 12px; border-radius:5px; border:1px solid #dee2e6;">';
+            html += '<span style="min-width:140px; font-weight:500; color:#2c3e50;">' + item + '</span>';
+            html += '<input type="number" class="fan-edit" data-pattern="' + item + '" value="' + fan + '" min="0" style="width:70px; padding:6px; text-align:center; margin-left:10px; border:1px solid #3498db; border-radius:4px; background:#fff; color:#e74c3c; font-weight:bold; font-size:14px;">';
+            html += '<span style="margin-left:8px; color:#666;">番</span></div>';
+        }
+        html += '</div>';
+    }
+    
+    container.innerHTML = html;
+}
+
+function addNewPreset() {
+    const presetName = prompt("請輸入新番種名稱：", "番種1");
+    if (!presetName) return;
+    
+    // Check if already exists
+    const select = document.getElementById('presetSelect');
+    for (let i = 0; i < select.options.length; i++) {
+        if (select.options[i].value === presetName) {
+            alert('❌ 番種名稱已存在！');
+            return;
+        }
+    }
+    
+    // Copy current patterns as template
+    const inputs = document.querySelectorAll('.fan-edit');
+    const patterns = {};
+    inputs.forEach(input => {
+        patterns[input.dataset.pattern] = parseInt(input.value) || 0;
+    });
+    
+    fetch('/api/fan_config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: presetName, patterns: patterns})
+    })
+    .then(r => r.json())
+    .then(data => {
+        alert('✅ 已添加新番種: ' + presetName);
+        loadPresetsList();
+        // Select the new preset
+        setTimeout(() => {
+            document.getElementById('presetSelect').value = presetName;
+            loadPreset();
+        }, 100);
+    });
+}
+
+function deletePreset() {
+    const select = document.getElementById('presetSelect');
+    const presetId = select.value;
+    const presetName = select.options[select.selectedIndex].text;
+    
+    if (presetId === 'default') {
+        alert('❌ 無法刪除預設番種！');
+        return;
+    }
+    
+    if (!confirm('確定要刪除番種「' + presetName + '」嗎？')) {
+        return;
+    }
+    
+    // Delete via API
+    fetch('/api/fan_config_delete', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: presetId})
+    })
+    .then(r => r.json())
+    .then(data => {
+        alert('✅ ' + data.message);
+        loadPresetsList();
+        // Switch to default
+        document.getElementById('presetSelect').value = 'default';
+        loadPreset();
+    });
+}
+
+function savePreset() {
+    // Get current preset name
+    const presetSelect = document.getElementById('presetSelect');
+    const currentPreset = presetSelect ? presetSelect.value : '自訂';
+    
+    if (!currentPreset) {
+        alert('請先選擇或創建一個番種！');
+        return;
+    }
+    
+    // Collect all fan values
+    const inputs = document.querySelectorAll('.fan-edit');
+    const patterns = {};
+    inputs.forEach(input => {
+        patterns[input.dataset.pattern] = parseInt(input.value) || 0;
+    });
+    
+    // Save to current preset (not prompt for name)
+    fetch('/api/fan_config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: currentPreset, patterns: patterns})
+    })
+    .then(r => r.json())
+    .then(data => {
+        alert('✅ 已保存到: ' + currentPreset);
+        loadPresetsList();
+        loadFanConfigFromServer();
+    });
+}
+</script>
+</body>
+</html>

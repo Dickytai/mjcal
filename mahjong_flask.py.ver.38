@@ -1,0 +1,426 @@
+#!/usr/bin/env python3
+"""
+🀄 麻將聽牌計算機 - Flask Web App
+功能編號:
+1. 13張/16張模式選擇 (setMode)
+2. 手牌/公開牌切換 (setInputMode)
+3. 百搭顯示 (renderButtons -> wildTiles)
+4. 花牌公開牌限制 (addTile -> isFlower)
+5. 每張牌最多4張 (addTile -> totalCount)
+6. 公開牌不影響手牌 (addTile)
+7. 算法調用 (/calc endpoint)
+8. 聽牌計算 (showResult waiting)
+9. 番數顯示 (showResult fan)
+10. 未聽牌顯示 (showResult shantenText)
+"""
+
+from flask import Flask, render_template_string, request, jsonify
+from typing import List, Dict, Tuple
+import json
+import subprocess
+
+app = Flask(__name__)
+
+# ========================
+# 牌數據
+# ========================
+
+def get_tile_unicode(code):
+    """Convert tile code (1m, 2s, etc.) to unicode"""
+    code_map = {
+        '1m':'1萬','2m':'2萬','3m':'3萬','4m':'4萬','5m':'5萬','6m':'6萬','7m':'7萬','8m':'8萬','9m':'9萬',
+        '1s':'1索','2s':'2索','3s':'3索','4s':'4索','5s':'5索','6s':'6索','7s':'7索','8s':'8索','9s':'9索',
+        '1p':'1筒','2p':'2筒','3p':'3筒','4p':'4筒','5p':'5筒','6p':'6筒','7p':'7筒','8p':'8筒','9p':'9筒',
+        '1z':'東','2z':'南','3z':'西','4z':'北','5z':'中','6z':'發','7z':'白'
+    }
+    return TILES.get(code_map.get(code, code), {}).get('unicode', '?')
+
+TILES = {
+    '1萬': {'suit': 'wan', 'value': 1, 'unicode': '🀇'}, '2萬': {'suit': 'wan', 'value': 2, 'unicode': '🀈'},
+    '3萬': {'suit': 'wan', 'value': 3, 'unicode': '🀉'}, '4萬': {'suit': 'wan', 'value': 4, 'unicode': '🀊'},
+    '5萬': {'suit': 'wan', 'value': 5, 'unicode': '🀋'}, '6萬': {'suit': 'wan', 'value': 6, 'unicode': '🀌'},
+    '7萬': {'suit': 'wan', 'value': 7, 'unicode': '🀍'}, '8萬': {'suit': 'wan', 'value': 8, 'unicode': '🀎'},
+    '9萬': {'suit': 'wan', 'value': 9, 'unicode': '🀏'},
+    '1索': {'suit': 'tiao', 'value': 11, 'unicode': '🀐'}, '2索': {'suit': 'tiao', 'value': 12, 'unicode': '🀑'},
+    '3索': {'suit': 'tiao', 'value': 13, 'unicode': '🀒'}, '4索': {'suit': 'tiao', 'value': 14, 'unicode': '🀓'},
+    '5索': {'suit': 'tiao', 'value': 15, 'unicode': '🀔'}, '6索': {'suit': 'tiao', 'value': 16, 'unicode': '🀕'},
+    '7索': {'suit': 'tiao', 'value': 17, 'unicode': '🀖'}, '8索': {'suit': 'tiao', 'value': 18, 'unicode': '🀗'},
+    '9索': {'suit': 'tiao', 'value': 19, 'unicode': '🀘'},
+    '1筒': {'suit': 'tong', 'value': 21, 'unicode': '🀙'}, '2筒': {'suit': 'tong', 'value': 22, 'unicode': '🀚'},
+    '3筒': {'suit': 'tong', 'value': 23, 'unicode': '🀛'}, '4筒': {'suit': 'tong', 'value': 24, 'unicode': '🀜'},
+    '5筒': {'suit': 'tong', 'value': 25, 'unicode': '🀝'}, '6筒': {'suit': 'tong', 'value': 26, 'unicode': '🀞'},
+    '7筒': {'suit': 'tong', 'value': 27, 'unicode': '🀟'}, '8筒': {'suit': 'tong', 'value': 28, 'unicode': '🀠'},
+    '9筒': {'suit': 'tong', 'value': 29, 'unicode': '🀡'},
+    '東': {'suit': 'zi', 'value': 31, 'unicode': '🀀'}, '南': {'suit': 'zi', 'value': 32, 'unicode': '🀁'},
+    '西': {'suit': 'zi', 'value': 33, 'unicode': '🀂'}, '北': {'suit': 'zi', 'value': 34, 'unicode': '🀃'},
+    '中': {'suit': 'zi', 'value': 35, 'unicode': '🀄'}, '發': {'suit': 'zi', 'value': 36, 'unicode': '🀅'},
+    '白': {'suit': 'zi', 'value': 37, 'unicode': '🀆'},
+}
+
+FLOWER_TILES = {
+    '梅': {'unicode': '🀢', 'suit': 'flower'}, '蘭': {'unicode': '🀣', 'suit': 'flower'},
+    '菊': {'unicode': '🀤', 'suit': 'flower'}, '竹': {'unicode': '🀥', 'suit': 'flower'},
+    '春': {'unicode': '🀦', 'suit': 'season'}, '夏': {'unicode': '🀧', 'suit': 'season'},
+    '秋': {'unicode': '🀨', 'suit': 'season'}, '冬': {'unicode': '🀩', 'suit': 'season'},
+}
+
+WILDCARDS = {
+    '皇': {'name': '皇', '替代': '任意牌', '數量': 34, 'unicode': '🃏', 'suit': 'wild', 'code': '1j'},
+    '番': {'name': '番', '替代': '中發白+風牌', '數量': 7, 'unicode': '🃏', 'suit': 'wild', 'code': '7j'},
+    '中發白': {'name': '中發白', '替代': '中發白內', '數量': 3, 'unicode': '🃏', 'suit': 'wild', 'code': '7j'},
+    '風': {'name': '風', '替代': '東南西北', '數量': 4, 'unicode': '🃏', 'suit': 'wild', 'code': '6j'},
+    '合': {'name': '合', '替代': '筒/索/萬', '數量': 27, 'unicode': '🃏', 'suit': 'wild', 'code': '5j'},
+    '筒': {'name': '筒', '替代': '任意筒', '數量': 9, 'unicode': '🃏', 'suit': 'wild', 'code': '3j'},
+    '索': {'name': '索', '替代': '任意索', '數量': 9, 'unicode': '🃏', 'suit': 'wild', 'code': '4j'},
+    '萬': {'name': '萬', '替代': '任意萬', '數量': 9, 'unicode': '🃏', 'suit': 'wild', 'code': '2j'},
+}
+
+HTML = '''<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>🀄 麻將聽牌計算機 v21</title>
+<style>
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+body { font-family: "Microsoft JhengHei", "PingFang TC", sans-serif; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); color: #fff; margin: 0; padding: 10px; padding-bottom: 120px; min-height: 100vh; }
+h1 { text-align: center; color: #ffd700; margin: 10px 0; font-size: 1.4em; }
+.mode-select { display: flex; gap: 10px; justify-content: center; margin: 10px 0; }
+.mode-btn { padding: 12px 24px; border: 2px solid #00f5d4; background: transparent; color: #00f5d4; border-radius: 25px; cursor: pointer; font-size: 16px; font-weight: bold; }
+.mode-btn.active { background: linear-gradient(135deg, #00f5d4, #00b894); color: #1a1a2e; }
+.tile-count { text-align: center; padding: 12px; border-radius: 20px; font-size: 14px; font-weight: bold; margin: 10px 0; }
+.tile-count.ok { background: linear-gradient(135deg, #00f5d4, #00b894); color: #1a1a2e; }
+.tile-count.warning { background: linear-gradient(135deg, #ffd700, #f39c12); color: #1a1a2e; }
+.display-section { margin: 10px 0; cursor: pointer; }
+.display-section .label { color: #aaa; font-size: 12px; margin-bottom: 6px; cursor: pointer; }
+.display-section .label.active { color: #00f5d4; font-weight: bold; }
+.tile-display { min-height: 55px; background: rgba(0, 0, 0, 0.4); border-radius: 12px; padding: 8px; display: flex; flex-wrap: wrap; gap: 4px; cursor: pointer; }
+.tile-display.active { border: 3px solid #00f5d4; background: rgba(0, 245, 212, 0.1); }
+.tile { width: 38px; height: 52px; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 26px; cursor: pointer; position: relative; }
+.tile.wan { background: linear-gradient(180deg, #ffeaa7, #fdcb6e); color: #8b0000; }
+.tile.tiao { background: linear-gradient(180deg, #d4efdf, #27ae60); color: #1e5631; }
+.tile.tong { background: linear-gradient(180deg, #a29bfe, #6c5ce7); color: #fff; }
+.tile.zi { background: linear-gradient(180deg, #ff7675, #d63031); color: #fff; }
+.tile.wild { background: linear-gradient(180deg, #ff6b6b, #c0392b); color: #fff; font-size: 14px; }
+.tile .remove { position: absolute; top: -5px; right: -5px; width: 16px; height: 16px; background: #e74c3c; color: #fff; border-radius: 50%; font-size: 12px; display: none; align-items: center; justify-content: center; }
+.tile:hover .remove { display: flex; }
+.tile-section { margin: 8px 0; }
+.tile-section h3 { color: #4ecdc4; margin: 8px 0; font-size: 13px; }
+.tile-grid { display: flex; flex-wrap: wrap; gap: 4px; }
+.tile-btn { width: 36px; height: 48px; border: none; border-radius: 6px; font-size: 22px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.tile-btn.wan { background: linear-gradient(180deg, #ffeaa7, #fdcb6e); color: #8b0000; }
+.tile-btn.tiao { background: linear-gradient(180deg, #d4efdf, #27ae60); color: #1e5631; }
+.tile-btn.tong { background: linear-gradient(180deg, #a29bfe, #6c5ce7); color: #fff; }
+.tile-btn.zi { background: linear-gradient(180deg, #ff7675, #d63031); color: #fff; }
+.tile-btn.wild { background: linear-gradient(180deg, #ff6b6b, #c0392b); color: #fff; font-size: 14px; }
+.btn-calculate { width: 100%; padding: 14px; border: none; border-radius: 25px; background: linear-gradient(135deg, #00f5d4, #00b894); color: #1a1a2e; font-size: 16px; font-weight: bold; cursor: pointer; margin: 12px 0; }
+.btn-clear { width: 100%; padding: 10px; border: 2px solid #ff7675; background: transparent; color: #ff7675; border-radius: 20px; cursor: pointer; font-size: 14px; margin-bottom: 10px; }
+.result-section { display: none; margin: 15px 0; background: rgba(0,0,0,0.4); border-radius: 15px; padding: 15px; }
+.result-section.show { display: block; }
+.result-box { background: rgba(0, 0, 0, 0.5); border-radius: 15px; padding: 15px; }
+.shanten { font-size: 32px; color: #fff; text-align: center; margin: 10px 0; font-weight: bold; text-shadow: 2px 2px 4px rgba(0,0,0,0.5); }
+.shanten.tenpai { color: #00ff00; text-shadow: 0 0 10px #00ff00; }
+.waiting-grid { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin: 12px 0; }
+.waiting-item { width: 38px; height: 52px; border-radius: 8px; display: flex; flex-direction: column; align-items: center; justify-content: center; position: relative; }
+.waiting-item.wan { background: linear-gradient(180deg, #f39c12, #d68910); }
+.waiting-item.tiao { background: linear-gradient(180deg, #27ae60, #1e8449); }
+.waiting-item.tong { background: linear-gradient(180deg, #8e44ad, #6c3483); }
+.waiting-item.zi { background: linear-gradient(180deg, #c0392b, #922b21); }
+.waiting-item.best { border: 2px solid #ffd700; }
+.waiting-item .tc { font-size: 22px; }
+.waiting-item .fan { font-size: 9px; color: #fff; background: rgba(0,0,0,0.6); padding: 1px 4px; border-radius: 6px; margin-top: 1px; }
+.waiting-item .cnt { font-size: 10px; color: #fff; }
+.waiting-item .cnt { position: absolute; top: -5px; right: -5px; font-size: 10px; background: #e74c3c; color: #fff; padding: 2px 5px; border-radius: 8px; }
+.suggestion { display: none; background: rgba(0,0,0,0.3); border-left: 3px solid #00ff00; padding: 10px; border-radius: 0 10px 10px 0; font-size: 11px; margin-top: 10px; color: #fff; word-break: break-all; }
+.tip { color: #666; font-size: 11px; text-align: center; margin: 8px 0; }
+.code-input { margin: 10px 0; }
+.code-input input { width: 100%; padding: 10px; border: 2px solid #4ecdc4; background: rgba(0,0,0,0.4); color: #fff; border-radius: 10px; font-size: 14px; font-family: monospace; }
+.code-input .hint { color: #666; font-size: 11px; margin-top: 5px; }
+.code-input button { margin-top: 8px; padding: 8px 16px; border: none; border-radius: 15px; background: #4ecdc4; color: #1a1a2e; font-size: 12px; cursor: pointer; }
+</style>
+</head>
+<body>
+<h1>🀄 麻將聽牌計算機</h1>
+<div class="mode-select">
+    <button class="mode-btn" id="mode13" onclick="setMode(13)">13張</button>
+    <button class="mode-btn active" id="mode16" onclick="setMode(16)">16張</button>
+</div>
+<div class="tile-count warning" id="tileCount">手牌: 0 | 公開牌: 0</div>
+<div class="display-section">
+    <div class="label active" id="openLabel" onclick="setInputMode('open')">🔓 公開牌 (點擊切換)</div>
+    <div class="tile-display" id="openDisplay" onclick="setInputMode('open')"></div>
+</div>
+<div class="display-section">
+    <div class="label" id="handLabel" onclick="setInputMode('hand')">🧱 手牌 (點擊切換)</div>
+    <div class="tile-display" id="handDisplay" onclick="setInputMode('hand')"></div>
+</div>
+<p class="tip">提示：點擊上方「公開牌」或「手牌」可切換輸入模式</p>
+<div class="tile-section"><h3>🀇 萬子</h3><div class="tile-grid" id="wanTiles"></div></div>
+<div class="tile-section"><h3>🀐 索子</h3><div class="tile-grid" id="tiaoTiles"></div></div>
+<div class="tile-section"><h3>🀙 筒子</h3><div class="tile-grid" id="tongTiles"></div></div>
+<div class="tile-section"><h3>🀀 字牌</h3><div class="tile-grid" id="ziTiles"></div></div>
+<div class="tile-section"><h3>🀢 花牌</h3><div class="tile-grid" id="flowerTiles"></div></div>
+<div class="tile-section"><h3>🃏 百搭</h3><div class="tile-grid" id="wildTiles"></div></div>
+<div class="code-input">
+    <input type="text" id="codeInput" placeholder="例如: 1112223334567m 或 111m222m333m456m7m">
+    <div class="hint">百搭: 1j=皇 2j=萬 3j=筒 4j=索 5j=合 6j=風 7j=番 8j=中發白</div>
+    <button onclick="loadFromCode()">📥 載入代碼</button>
+</div>
+<button class="btn-calculate" onclick="calculate()">🔍 計算聽牌</button>
+<button class="btn-clear" onclick="clearAll()">🗑️ 清除全部</button>
+<div class="result-section" id="resultSection">
+    <div class="result-box">
+        <div class="shanten" id="shantenResult"></div>
+        <div class="waiting-grid" id="waitingGrid"></div>
+        <div class="suggestion" id="suggestion"></div>
+    </div>
+</div>
+<script>
+const tiles = {{ tiles_json | tojson | safe }};
+const flowerTiles = {{ flower_json | tojson | safe }};
+const wildcards = {{ wildcards_json | tojson | safe }};
+let gameMode = 16;
+let openTiles = [];
+let handTiles = [];
+let inputMode = 'open';
+
+function init() { renderButtons(); setInputMode('open'); }
+
+function loadFromCode() {
+    const code = document.getElementById('codeInput').value.trim();
+    if (!code) { alert('請輸入牌代碼'); return; }
+
+    // 解析格式: 1m=1萬, 1s=1索, 1p=1筒, 1z-7z=東南西北中發白
+    // 百搭: 1j=皇(任意), 2j=萬, 3j=筒, 4j=索, 5j=數牌, 6j=風, 7j=三元, 8j=字牌
+    const suitMap = {'m': '萬', 's': '索', 'p': '筒'};
+    const ziMap = {'1': '東', '2': '南', '3': '西', '4': '北', '5': '中', '6': '發', '7': '白'};
+    const wildMap = {
+        '1j': '皇', 'J': '皇', '皇': '皇',
+        '2j': '萬', '萬': '萬',
+        '3j': '筒', '筒': '筒',
+        '4j': '索', '索': '索',
+        '5j': '合', '合': '合',
+        '6j': '風', '風': '風',
+        '7j': '番', '番': '番',
+        '8j': '中發白', '中發白': '中發白',
+    };
+
+    const tileList = [];
+    let remaining = code;
+
+    // 處理百搭 (1j, 2j, 3j, etc.)
+    remaining = remaining.replace(/(\d)(j)/gi, (match, num, j) => {
+        const key = num + j.toLowerCase();
+        if (wildMap[key]) {
+            tileList.push(wildMap[key]);
+        }
+        return '';
+    });
+
+    // 處理中文百搭
+    remaining = remaining.replace(/(皇|番|中發白|風|合|筒|索|萬)/g, (match) => {
+        tileList.push(match);
+        return '';
+    });
+
+    // 處理 m/s/p 結尾既牌 (如 111m)
+    remaining = remaining.replace(/(\d+)([msp])/g, (match, nums, suit) => {
+        for (let i = 0; i < nums.length; i++) {
+            tileList.push(nums[i] + suitMap[suit]);
+        }
+        return '';
+    });
+
+    // 處理 z 結尾既牌 (如 1z, 22z = 南南)
+    remaining = remaining.replace(/(\d+)(z)/g, (match, nums, z) => {
+        for (let i = 0; i < nums.length; i++) {
+            if (ziMap[nums[i]]) tileList.push(ziMap[nums[i]]);
+        }
+        return '';
+    });
+
+    if (tileList.length === 0) {
+        alert('代碼格式錯誤');
+        return;
+    }
+
+    // 清空並載入
+    openTiles = [];
+    handTiles = tileList;
+    inputMode = 'hand';
+    setInputMode('hand');
+    updateDisplay();
+    document.getElementById('codeInput').value = '';
+}
+
+function renderButtons() {
+    const wan = ['1萬','2萬','3萬','4萬','5萬','6萬','7萬','8萬','9萬'];
+    const tiao = ['1索','2索','3索','4索','5索','6索','7索','8索','9索'];
+    const tong = ['1筒','2筒','3筒','4筒','5筒','6筒','7筒','8筒','9筒'];
+    const zi = ['東','南','西','北','中','發','白'];
+    wan.forEach(t => document.getElementById('wanTiles').appendChild(btn(t, 'wan')));
+    tiao.forEach(t => document.getElementById('tiaoTiles').appendChild(btn(t, 'tiao')));
+    tong.forEach(t => document.getElementById('tongTiles').appendChild(btn(t, 'tong')));
+    zi.forEach(t => document.getElementById('ziTiles').appendChild(btn(t, 'zi')));
+    Object.keys(flowerTiles).forEach(t => { const b = btn(t, 'flower'); b.style.fontSize = '16px'; document.getElementById('flowerTiles').appendChild(b); });
+    Object.keys(wildcards).forEach(key => { const b = btn(key, 'wild'); b.textContent = wildcards[key].name; b.title = wildcards[key].替代; document.getElementById('wildTiles').appendChild(b); });
+}
+
+function btn(tile, css) { const b = document.createElement('button'); b.className = 'tile-btn ' + css; b.textContent = tiles[tile]?.unicode || flowerTiles[tile]?.unicode || wildcards[tile]?.name || tile; b.onclick = () => addTile(tile); return b; }
+
+function setMode(m) { gameMode = m; document.getElementById('mode13').className = m === 13 ? 'mode-btn active' : 'mode-btn'; document.getElementById('mode16').className = m === 16 ? 'mode-btn active' : 'mode-btn'; updateDisplay(); }
+
+function setInputMode(mode) {
+    inputMode = mode;
+    const openDisplay = document.getElementById('openDisplay');
+    const handDisplay = document.getElementById('handDisplay');
+    const openLabel = document.getElementById('openLabel');
+    const handLabel = document.getElementById('handLabel');
+    if (mode === 'open') { openDisplay.classList.add('active'); handDisplay.classList.remove('active'); openLabel.classList.add('active'); handLabel.classList.remove('active'); }
+    else { handDisplay.classList.add('active'); openDisplay.classList.remove('active'); handLabel.classList.add('active'); openLabel.classList.remove('active'); }
+}
+
+function addTile(tile) {
+    const totalCount = (handTiles.filter(t => t === tile).length) + (openTiles.filter(t => t === tile).length);
+    if (totalCount >= 4) { alert('每張牌最多4張！'); return; }
+    const isFlower = flowerTiles[tile] !== undefined;
+    if (isFlower) { openTiles.push(tile); }
+    else if (inputMode === 'hand') { handTiles.push(tile); }
+    else { openTiles.push(tile); }
+    updateDisplay();
+}
+
+function removeOpen(i) { openTiles.splice(i, 1); updateDisplay(); }
+function removeHand(i) { handTiles.splice(i, 1); updateDisplay(); }
+function clearAll() { openTiles = []; handTiles = []; document.getElementById('resultSection').classList.remove('show'); updateDisplay(); }
+
+function updateDisplay() {
+    document.getElementById('tileCount').textContent = '手牌: ' + handTiles.length + ' | 公開牌: ' + openTiles.length;
+    const od = document.getElementById('openDisplay'); od.innerHTML = ''; openTiles.forEach((t, i) => { const d = tileDiv(t); d.onclick = () => removeOpen(i); od.appendChild(d); });
+    const hd = document.getElementById('handDisplay'); hd.innerHTML = ''; handTiles.forEach((t, i) => { const d = tileDiv(t); d.onclick = () => removeHand(i); hd.appendChild(d); });
+}
+
+function tileDiv(tile) {
+    const d = document.createElement('div'); let c = 'tile ';
+    if (tiles[tile]) c += tiles[tile].suit;
+    else if (flowerTiles[tile]) c += flowerTiles[tile].suit;
+    else if (wildcards[tile]) c += 'wild';
+    d.className = c;
+    d.innerHTML = (tiles[tile]?.unicode || flowerTiles[tile]?.unicode || wildcards[tile]?.name || tile) + '<span class="remove">×</span>';
+    return d;
+}
+
+function calculate() {
+    fetch('/calc', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ hand: handTiles, open: openTiles, mode: gameMode }) }).then(r => r.json()).then(showResult);
+}
+
+function showResult(d) {
+    const s = document.getElementById('resultSection'); s.classList.add('show');
+    let shantenText;
+    if (d.shanten === 0) shantenText = '🎉 已聽牌!';
+    else if (d.shanten > 0) shantenText = '向聽數: ' + d.shanten;
+    else shantenText = '❌ 未能聽牌';
+    document.getElementById('shantenResult').textContent = shantenText;
+    document.getElementById('shantenResult').className = 'shanten' + (d.shanten === 0 ? ' tenpai' : '');
+    const g = document.getElementById('waitingGrid'); g.innerHTML = '';
+    if (d.waiting.length === 0) { g.innerHTML = '<div style="color:#aaa;font-size:14px">暫無聽牌</div>'; }
+    else { 
+        // 按花色分組顯示 (tile是英文代號: 1m, 1s, 1p, 1z)
+        const suits = { 'wan': [], 'tiao': [], 'tong': [], 'zi': [] };
+        d.waiting.forEach(w => {
+            const t = w.tile;
+            if (t.match(/m$/)) suits.wan.push(w);
+            else if (t.match(/s$/)) suits.tiao.push(w);
+            else if (t.match(/p$/)) suits.tong.push(w);
+            else suits.zi.push(w);
+        });
+        
+        // 逐一顯示各花色
+        Object.keys(suits).forEach(suit => {
+            if (suits[suit].length === 0) return;
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;gap:6px;justify-content:center;margin:5px 0;flex-wrap:wrap;';
+            suits[suit].forEach(w => {
+                const it = document.createElement('div');
+                it.className = 'waiting-item ' + suit;
+                it.innerHTML = '<span class="tc">' + w.unicode + '</span><span class="fan">' + w.fan + '番</span>';
+                row.appendChild(it);
+            });
+            g.appendChild(row);
+        });
+    }
+    
+    // 組建建議文字，按花色分行 (英文代號: m=wan, s=tiao, p=tong, z=zi)
+    const sugTiles = d.waiting.map(w => w.tile + (w.fan > 1 ? '(' + w.fan + 'fan)' : ''));
+    const sugBySuit = { 'm': [], 's': [], 'p': [], 'z': [] };
+    d.waiting.forEach((w, i) => {
+        const t = w.tile;
+        if (t.match(/m$/)) sugBySuit['m'].push(sugTiles[i]);
+        else if (t.match(/s$/)) sugBySuit['s'].push(sugTiles[i]);
+        else if (t.match(/p$/)) sugBySuit['p'].push(sugTiles[i]);
+        else sugBySuit['z'].push(sugTiles[i]);
+    });
+    const sugParts = [];
+    if (sugBySuit['m'].length) sugParts.push('<span style="color:#f39c12">m:' + sugBySuit['m'].join('') + '</span>');
+    if (sugBySuit['s'].length) sugParts.push('<span style="color:#27ae60">s:' + sugBySuit['s'].join('') + '</span>');
+    if (sugBySuit['p'].length) sugParts.push('<span style="color:#9b59b6">p:' + sugBySuit['p'].join('') + '</span>');
+    if (sugBySuit['z'].length) sugParts.push('<span style="color:#e74c3c">z:' + sugBySuit['z'].join('') + '</span>');
+    const sug = d.waiting.length > 0 ? '<strong>💡 可胡牌型：</strong><br>' + sugParts.join('<br>') : (d.shanten > 0 ? '需要再食牌先可以聽牌' : '未能聽牌');
+    document.getElementById('suggestion').innerHTML = sug;
+    s.scrollIntoView({behavior: 'smooth'});
+}
+
+init();
+</script>
+</body>
+</html>
+'''
+
+@app.route('/')
+def index():
+    return render_template_string(HTML, tiles_json=TILES, flower_json=FLOWER_TILES, wildcards_json=WILDCARDS)
+
+@app.route('/calc', methods=['POST'])
+def calc():
+    data = request.json
+    hand = data.get('hand', [])
+    open_tiles = data.get('open', [])
+    mode = data.get('mode', 16)  # 13 or 16 tile mode
+    
+    # 只用手牌計算！公開牌已經係固定既面子，唔影響向聽數
+    all_tiles = hand
+    
+    # 直接用手牌數量，唔强制要求特定數字
+    expected = len(hand)
+
+    try:
+        result = subprocess.run(
+            ['node', '/home/tai/mjcal/mj_calc.js', 'waiting', json.dumps(all_tiles), str(expected)],
+            capture_output=True, text=True, timeout=10
+        )
+
+        if result.returncode == 0:
+            node_result = json.loads(result.stdout)
+            shanten = node_result.get('shanten', 0)
+            waiting_tiles = node_result.get('waiting', [])
+
+            # 轉換牌格式 - 用英文代號 (1m, 2s, etc.)
+            waiting = []
+            for wt in waiting_tiles:
+                tile_code = wt.get('tile', '')
+                waiting.append({
+                    'tile': tile_code,  # English: 1m, 1s, etc.
+                    'unicode': get_tile_unicode(tile_code),
+                    'count': wt.get('count', 1),
+                    'fan': 1
+                })
+
+            return jsonify({'shanten': shanten, 'waiting': waiting})
+        else:
+            return jsonify({'shanten': -1, 'waiting': []})
+    except Exception as e:
+        return jsonify({'shanten': -1, 'waiting': []})
+
+if __name__ == '__main__':
+    print("🀄 麻將聽牌計算機 - http://192.168.1.88:5000")
+    app.run(host='0.0.0.0', port=5000, debug=False)

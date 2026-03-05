@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>🀄 麻將聽牌計算機</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<h1>🀄 麻將聽牌計算機</h1>
+
+<div class="mode-select">
+    <button class="mode-btn active" id="mode16" data-mode="16">16張</button>
+    <button class="mode-btn" id="debugBtn" onclick="toggleDebugMode()">🔧 調試</button>
+</div>
+
+<!-- Debug Mode Panel -->
+<div class="debug-panel" id="debugPanel" style="display:none;">
+    <div class="debug-header">
+        <h3>🔧 牌型測試模式</h3>
+        <button onclick="toggleDebugMode()">關閉</button>
+    </div>
+    <div class="debug-content">
+        <label>選擇牌型：</label>
+        <select id="patternSelect" onchange="selectPattern()">
+            <option value="">-- 選擇牌型 --</option>
+        </select>
+        <div class="pattern-stats" id="patternStats"></div>
+        <div class="debug-result" id="debugResult"></div>
+    </div>
+</div>
+
+<div class="tile-count warning" id="tileCount">手牌: 0 | 公開牌: 0</div>
+
+<div class="display-section">
+    <div class="label active" id="openLabel">🔓 公開牌</div>
+    <div class="tile-display" id="openDisplay"></div>
+</div>
+
+<div class="display-section">
+    <div class="label" id="handLabel">🧱 手牌</div>
+    <div class="tile-display" id="handDisplay"></div>
+</div>
+
+<div class="code-input">
+    <input type="text" id="codeInput" placeholder="例如: 1112223334567m 或 111m222m333m456m7m">
+    <div class="hint">百搭: 1j=皇 2j=合 3j=萬 4j=筒 5j=索 6j=風 7j=番 8j=中發白</div>
+    <div class="btn-row">
+        <button onclick="loadFromCode()">📥 載入代碼</button>
+        <button onclick="generateWinningHand()" class="btn-gen">🎲 生成17張胡牌</button>
+        <button onclick="savePatternExample()" class="btn-save" id="saveBtn" style="display:none;">✅ 確認輸入牌型</button>
+    </div>
+</div>
+
+<p class="tip">提示：點擊上方「公開牌」或「手牌」可切換輸入模式</p>
+
+<div class="tile-section"><h3>🀇 萬子</h3><div class="tile-grid" id="wanTiles"></div></div>
+<div class="tile-section"><h3>🀐 索子</h3><div class="tile-grid" id="tiaoTiles"></div></div>
+<div class="tile-section"><h3>🀙 筒子</h3><div class="tile-grid" id="tongTiles"></div></div>
+<div class="tile-section"><h3>🀀 字牌</h3><div class="tile-grid" id="ziTiles"></div></div>
+<div class="tile-section"><h3>🀢 花牌</h3><div class="tile-grid" id="flowerTiles"></div></div>
+<div class="tile-section"><h3>🃏 百搭</h3><div class="tile-grid" id="wildTiles"></div></div>
+
+<button class="btn-calculate" onclick="calculate()">🔍 計算聽牌</button>
+<button class="btn-clear" onclick="clearAll()">🗑️ 清除全部</button>
+
+<div class="result-section" id="resultSection">
+    <div class="result-box">
+        <div class="shanten" id="shantenResult"></div>
+        <div class="waiting-grid" id="waitingGrid"></div>
+    </div>
+</div>
+
+<!-- Custom Modal -->
+<div class="modal" id="modal">
+    <div class="modal-content">
+        <span class="modal-close" onclick="closeModal()">&times;</span>
+        <div id="modalBody"></div>
+    </div>
+</div>
+
+<script>
+const TILES = {{ tiles_json | tojson | safe }};
+const FLOWER_TILES = {{ flower_json | tojson | safe }};
+const WILDCARDS = {{ wildcards_json | tojson | safe }};
+
+// State
+let gameMode = 16;
+let openTiles = [];
+let handTiles = [];
+let inputMode = 'open';
+
+// Initialize
+function init() {
+    renderButtons();
+    bindEvents();
+    setInputMode('open');
+}
+
+// Bind events
+function bindEvents() {
+    document.getElementById('openDisplay').addEventListener('click', () => setInputMode('open'));
+    document.getElementById('handDisplay').addEventListener('click', () => setInputMode('hand'));
+    document.querySelectorAll('.mode-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => setMode(parseInt(e.target.dataset.mode)));
+    });
+}
+
+// Render tile buttons
+function renderButtons() {
+    const suits = [
+        { id: 'wanTiles', key: 'wan', tiles: ['1m','2m','3m','4m','5m','6m','7m','8m','9m'] },
+        { id: 'tiaoTiles', key: 'tiao', tiles: ['1s','2s','3s','4s','5s','6s','7s','8s','9s'] },
+        { id: 'tongTiles', key: 'tong', tiles: ['1p','2p','3p','4p','5p','6p','7p','8p','9p'] },
+        { id: 'ziTiles', key: 'zi', tiles: ['1z','2z','3z','4z','5z','6z','7z'] },
+    ];
+
+    suits.forEach(s => {
+        const container = document.getElementById(s.id);
+        s.tiles.forEach(tile => {
+            const btn = document.createElement('button');
+            btn.className = 'tile-btn ' + s.key;
+            btn.textContent = TILES[tile]?.unicode || '?';
+            btn.onclick = () => addTile(tile);
+            container.appendChild(btn);
+        });
+    });
+
+    // Flower tiles
+    const flowerContainer = document.getElementById('flowerTiles');
+    Object.keys(FLOWER_TILES).forEach(tile => {
+        const btn = document.createElement('button');
+        btn.className = 'tile-btn flower';
+        btn.textContent = FLOWER_TILES[tile].unicode;
+        btn.onclick = () => addTile(tile);
+        flowerContainer.appendChild(btn);
+    });
+
+    // Wildcards
+    const wildContainer = document.getElementById('wildTiles');
+    Object.keys(WILDCARDS).forEach(key => {
+        const w = WILDCARDS[key];
+        const btn = document.createElement('button');
+        btn.className = 'tile-btn wild';
+        btn.textContent = w.unicode;
+        btn.title = w.name + ': ' + w.替代;
+        btn.onclick = () => addTile(w.code);
+        wildContainer.appendChild(btn);
+    });
+}
+
+// Add tile
+function addTile(tile) {
+    const arr = inputMode === 'open' ? openTiles : handTiles;
+    const counts = {};
+    arr.forEach(t => counts[t] = (counts[t] || 0) + 1);
+
+    if ((counts[tile] || 0) >= 4) {
+        showModal('每張牌最多4張！');
+        return;
+    }
+
+    if (inputMode === 'open') {
+        if (openTiles.length >= 16) {
+            showModal('公開牌最多16張！');
+            return;
+        }
+        openTiles.push(tile);
+    } else {
+        if (handTiles.length >= 17) {
+            showModal('手牌最多17張！');
+            return;
+        }
+        handTiles.push(tile);
+    }
+    updateDisplay();
+}
+
+// Remove tile
+function removeTile(arr, index) {
+    arr.splice(index, 1);
+    updateDisplay();
+}
+
+// Update display
+function updateDisplay() {
+    document.getElementById('tileCount').textContent = '手牌: ' + handTiles.length + ' | 公開牌: ' + openTiles.length;
+
+    const od = document.getElementById('openDisplay');
+    od.innerHTML = '';
+    openTiles.forEach((t, i) => {
+        const d = createTileDiv(t);
+        d.onclick = () => removeTile(openTiles, i);
+        od.appendChild(d);
+    });
+
+    const hd = document.getElementById('handDisplay');
+    hd.innerHTML = '';
+    handTiles.forEach((t, i) => {
+        const d = createTileDiv(t);
+        d.onclick = () => removeTile(handTiles, i);
+        hd.appendChild(d);
+    });
+}
+
+// Create tile div
+function createTileDiv(tile) {
+    const d = document.createElement('div');
+    let c = 'tile ';
+    if (TILES[tile]) c += TILES[tile].suit;
+    else if (FLOWER_TILES[tile]) c += FLOWER_TILES[tile].suit;
+    else if (tile.endsWith('j')) c += 'wild';
+    d.className = c;
+    
+    // Get display text
+    let text = tile;
+    if (TILES[tile]) text = TILES[tile].unicode;
+    else if (FLOWER_TILES[tile]) text = FLOWER_TILES[tile].unicode;
+    else if (tile.endsWith('j')) {
+        // Map code to name (matching backend code)
+        const map = {'1j':'🃏皇','2j':'合','3j':'萬','4j':'筒','5j':'索','6j':'風','7j':'番','8j':'中發白'};
+        text = map[tile] || tile;
+    }
+    
+    d.innerHTML = text + '<span class="remove">×</span>';
+    return d;
+}
+
+// Set input mode
+function setInputMode(mode) {
+    inputMode = mode;
+    document.getElementById('openLabel').classList.toggle('active', mode === 'open');
+    document.getElementById('handLabel').classList.toggle('active', mode === 'hand');
+    document.getElementById('openDisplay').classList.toggle('active', mode === 'open');
+    document.getElementById('handDisplay').classList.toggle('active', mode === 'hand');
+}
+
+// Set game mode
+function setMode(mode) {
+    gameMode = mode;
+    document.querySelectorAll('.mode-btn').forEach(btn => {
+        btn.classList.toggle('active', parseInt(btn.dataset.mode) === mode);
+    });
+}
+
+// Load from code
+function loadFromCode() {
+    const code = document.getElementById('codeInput').value.trim();
+    if (!code) { showModal('請輸入牌代碼'); return; }
+
+    handTiles = [];
+    openTiles = [];
+
+    const tokens = code.match(/[0-9]+[mpsznj]/g) || [];
+    tokens.forEach(token => {
+        const num = token.slice(0, -1);
+        const suit = token.slice(-1);
+        const actualSuit = suit === 'j' ? 'z' : suit;
+        for (let i = 0; i < num.length; i++) {
+            const tile = num[i] + actualSuit;
+            if (TILES[tile]) handTiles.push(tile);
+        }
+    });
+
+    updateDisplay();
+    calculate();
+}
+
+// Generate winning hand
+// Generate winning hand - use backend API for 100% success
+function generateWinningHand() {
+    fetch('/generate')
+        .then(r => r.json())
+        .then(data => {
+            if (data.hand) {
+                handTiles = data.hand;
+                openTiles = [];
+                updateDisplay();
+                setTimeout(calculate, 100);
+            } else {
+                showModal('生成失敗，請再試');
+            }
+        })
+        .catch(e => {
+            showModal('Error: ' + e.message);
+        });
+}
+
+function idxToTile(idx) {
+    if (idx === undefined || idx === null || isNaN(idx) || idx < 0 || idx >= 34) return '';
+    const suits = ['m', 's', 'p'];
+    const suit = Math.floor(idx / 9);
+    const num = idx % 9;
+    return (num + 1) + suits[suit];
+}
+
+// Calculate
+function calculate() {
+    fetch('/calc', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ hand: handTiles, open: openTiles, mode: gameMode })
+    }).then(r => r.json()).then(showResult);
+}
+
+// Show result
+function showResult(d) {
+    const s = document.getElementById('resultSection');
+    s.classList.add('show');
+
+    let shantenText = '';
+    let shantenClass = '';
+
+    if (d.shanten === -1) {
+        const totalFan = d.winning_fan || 0;
+        const breakdown = d.winning_breakdown || [];
+        shantenText = '🀄 已胡牌！總番數: ' + totalFan + ' 番';
+        shantenClass = ' tenpai';
+
+        if (breakdown.length > 0) {
+            // Group patterns by fan count (high to low)
+            const sorted = [...breakdown].sort((a, b) => b.fan - a.fan);
+            const bdHtml = sorted.map(b => 
+                '<span class="fan-tag">' + b.name + '<span class="fan-num">' + b.fan + '</span></span>'
+            ).join('');
+            document.getElementById('waitingGrid').innerHTML = '<div class="fan-list">' + bdHtml + '</div>';
+        }
+    } else if (d.shanten === 0) {
+        shantenText = '🎉 已聽牌!';
+        shantenClass = ' tenpai';
+    } else if (d.shanten > 0) {
+        shantenText = '向聽數: ' + d.shanten;
+    } else {
+        shantenText = '❌ 未能聽牌';
+    }
+
+    document.getElementById('shantenResult').textContent = shantenText;
+    document.getElementById('shantenResult').className = 'shanten' + shantenClass;
+
+    const g = document.getElementById('waitingGrid');
+    if (d.shanten === -1) {
+        // Winning - breakdown shown above
+    } else if (d.waiting.length === 0) {
+        g.innerHTML = '<div style="color:#aaa;font-size:14px">暫無聽牌</div>';
+    } else {
+        const suits = { 'wan': [], 'tiao': [], 'tong': [], 'zi': [] };
+        d.waiting.forEach(w => {
+            const t = w.tile;
+            if (t.endsWith('m')) suits.wan.push(w);
+            else if (t.endsWith('s')) suits.tiao.push(w);
+            else if (t.endsWith('p')) suits.tong.push(w);
+            else suits.zi.push(w);
+        });
+
+        let html = '';
+        Object.keys(suits).forEach(suit => {
+            if (suits[suit].length === 0) return;
+            html += '<div style="display:flex;gap:6px;justify-content:center;margin:5px 0;flex-wrap:wrap;">';
+            suits[suit].forEach(w => {
+                html += '<div class="waiting-item ' + suit + '" onclick="showBreakdown(\'' + w.tile + '\', \'' + w.unicode + '\', ' + JSON.stringify(w.breakdown).replace(/"/g, '&quot;') + ', ' + w.fan + ')">';
+                html += '<span class="tc">' + w.unicode + '</span>';
+                html += '<span class="fan">' + w.fan + '番</span>';
+                html += '</div>';
+            });
+            html += '</div>';
+        });
+        g.innerHTML = html;
+    }
+
+    s.scrollIntoView({ behavior: 'smooth' });
+}
+
+function showBreakdown(tile, unicode, breakdown, fan) {
+    if (breakdown && breakdown.length > 0) {
+        const msg = breakdown.map(b => b.name + ': ' + b.fan + '番').join('\n');
+        showModal('胡 ' + unicode + ' 的牌型:\n' + msg + '\n\n總番數: ' + fan + '番');
+    } else {
+        showModal('胡 ' + unicode + ': ' + fan + '番');
+    }
+}
+
+function showModal(content) {
+    document.getElementById('modalBody').innerHTML = content.replace(/\n/g, '<br>');
+    document.getElementById('modal').classList.add('show');
+}
+
+function closeModal() {
+    document.getElementById('modal').classList.remove('show');
+}
+
+function clearAll() {
+    openTiles = [];
+    handTiles = [];
+    document.getElementById('resultSection').classList.remove('show');
+    updateDisplay();
+}
+
+// ========== Debug Mode ==========
+let debugMode = false;
+let patternCounts = {};
+let currentPattern = "";
+
+// All known patterns
+const ALL_PATTERNS = [
+    "斷幺", "缺一門", "雜龍", "清龍", "一般高", "三般高", "四般高",
+    "二兄弟", "小三兄弟", "大三兄弟",
+    "兩姊妹", "三姊妹", "四姊妹",
+    "老少", "清一色", "混一色", "字一色",
+    "一色三步高", "一色四步高", "一色五步高",
+    "二相逢", "三相逢", "四同順", "五同順",
+    "四暗刻", "三暗刻", "坎坎胡", "七對子", "嚦咕",
+    "十六不搭", "十三幺", "七星不靠",
+    "風字坎", "箭刻", "四歸一", "四歸二"
+];
+
+// Initialize pattern counts
+function initPatternCounts() {
+    ALL_PATTERNS.forEach(p => {
+        if (!patternCounts[p]) patternCounts[p] = 0;
+    });
+}
+
+function toggleDebugMode() {
+    debugMode = !debugMode;
+    const panel = document.getElementById('debugPanel');
+    const btn = document.getElementById('debugBtn');
+    const saveBtn = document.getElementById('saveBtn');
+    
+    if (debugMode) {
+        panel.style.display = 'block';
+        btn.classList.add('active');
+        saveBtn.style.display = 'inline-block';
+        initPatternCounts();
+        populatePatternSelect();
+        loadSavedExamples();
+    } else {
+        panel.style.display = 'none';
+        btn.classList.remove('active');
+        saveBtn.style.display = 'none';
+    }
+}
+
+function populatePatternSelect() {
+    const select = document.getElementById('patternSelect');
+    select.innerHTML = '<option value="">-- 選擇牌型 --</option>';
+    
+    // Sort by count desc
+    const sorted = ALL_PATTERNS.sort((a, b) => (patternCounts[b] || 0) - (patternCounts[a] || 0));
+    
+    sorted.forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p;
+        opt.textContent = `${p} (${patternCounts[p] || 0})`;
+        select.appendChild(opt);
+    });
+}
+
+function selectPattern() {
+    currentPattern = document.getElementById('patternSelect').value;
+    updatePatternStats();
+}
+
+function updatePatternStats() {
+    const stats = document.getElementById('patternStats');
+    if (!currentPattern) {
+        stats.innerHTML = '';
+        return;
+    }
+    stats.innerHTML = `<strong>${currentPattern}</strong>: 成功次數 = ${patternCounts[currentPattern] || 0}`;
+}
+
+// Save pattern example to server
+function savePatternExample() {
+    if (!currentPattern) {
+        alert('請先選擇牌型！');
+        return;
+    }
+    
+    const allTiles = [...openTiles, ...handTiles];
+    if (allTiles.length < 14) {
+        alert('請輸入至少14張牌！');
+        return;
+    }
+    
+    fetch('/save_example', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            pattern: currentPattern,
+            tiles: allTiles
+        })
+    })
+    .then(r => r.json())
+    .then(data => {
+        alert(`已儲存「${currentPattern}」案例！(${data.count}個)`);
+        loadSavedExamples();
+    })
+    .catch(err => {
+        alert('儲存失敗！');
+    });
+}
+
+// Load and display saved examples from server
+function loadSavedExamples() {
+    fetch('/load_examples')
+    .then(r => r.json())
+    .then(examples => {
+        const stats = document.getElementById('patternStats');
+        
+        let html = `<strong>已儲存案例：</strong><br>`;
+        let total = 0;
+        
+        for (const pattern in examples) {
+            const count = examples[pattern].length;
+            total += count;
+            html += `${pattern}: ${count}個<br>`;
+        }
+        
+        if (total === 0) {
+            html += '暫無案例';
+        }
+        
+        stats.innerHTML = html;
+    })
+    .catch(err => {
+        console.error('Failed to load examples:', err);
+    });
+}
+
+// Show examples for selected pattern
+function showPatternExamples(pattern) {
+    fetch('/load_examples')
+    .then(r => r.json())
+    .then(examples => {
+        return examples[pattern] || [];
+    });
+}
+
+function checkPattern() {
+    if (!currentPattern) {
+        alert('請先選擇牌型！');
+        return;
+    }
+    
+    // Get current hand
+    const allTiles = [...openTiles, ...handTiles];
+    if (allTiles.length !== 16 && allTiles.length !== 17) {
+        alert('請輸入16或17張手牌！');
+        return;
+    }
+    
+    // Send to server for calculation
+    fetch('/calc', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({hand: allTiles, open: [], mode: 16})
+    })
+    .then(r => r.json())
+    .then(result => {
+        const detected = result.winning_breakdown.map(p => p.name);
+        const resultDiv = document.getElementById('debugResult');
+        
+        if (result.shanten !== -1) {
+            resultDiv.innerHTML = '❌ 隻手牌唔係胡牌！';
+            return;
+        }
+        
+        if (detected.includes(currentPattern)) {
+            patternCounts[currentPattern] = (patternCounts[currentPattern] || 0) + 1;
+            resultDiv.innerHTML = `✅ 正確！檢測到 <strong>${currentPattern}</strong><br>全部牌型: ${detected.join(', ')}`;
+            populatePatternSelect();
+            updatePatternStats();
+        } else {
+            resultDiv.innerHTML = `❌ 錯誤！期望: ${currentPattern}<br>實際檢測: ${detected.join(', ')}`;
+        }
+    });
+}
+
+// Override calculate to add debug check
+const originalCalculate = calculate;
+calculate = function() {
+    if (debugMode && currentPattern) {
+        checkPattern();
+        return;
+    }
+    originalCalculate();
+};
+
+init();
+</script>
+</body>
+</html>
