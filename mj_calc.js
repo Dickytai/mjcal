@@ -1391,9 +1391,9 @@ function getMinShanten(counts, wildcards, tileMode = 16) {
             else if (counts[i] === 4) pairCount += 2; // kong = 2 pairs
         }
         
-        // 如果有7對或以上，視為聽牌(0)，唔係胡牌(-1)
+        // 7對(14張) = 胡牌(-1), 8對(16張) = 聽牌(0)
         if (pairCount >= 7) {
-            minS = 0; // 聽牌
+            minS = (pairCount === 7) ? -1 : 0; // 7對=胡牌, 8對+=聽牌
         }
     }
     
