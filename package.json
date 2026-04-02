@@ -1,15 +1,17 @@
 {
   "name": "mjcal",
   "version": "1.0.0",
-  "description": "",
+  "description": "🀄 麻将听牌计算器 - Mahjong Tenpai Calculator",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "vercel dev",
+    "build": "vercel build",
+    "start": "vercel serve"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
     "mahjong-tile-efficiency": "^1.0.3"
+  },
+  "devDependencies": {
+    "vercel": "^33.0.0"
   }
 }
