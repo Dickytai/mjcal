@@ -27,3 +27,13 @@ Thumbs.db
 # Test files
 *_test.js
 test_*.js
+.vercel
+
+# Next.js
+.next/
+out/
+build/
+
+# Keep calculation logic
+!mj_calc.js
+!sheauhaw_adapter.js
