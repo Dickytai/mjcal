@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
-import { tilesToHand, RuleSet } from 'mahjong-tile-efficiency';
+// @ts-ignore - type declaration bug: exports tilesToHand but .d.ts says tilesTohand
+import { tilesToHand } from 'mahjong-tile-efficiency';
 
 function indexToTile(idx: number): string {
   if (idx < 9) return `${idx + 1}m`;
@@ -76,7 +77,7 @@ export async function GET() {
 
     // Verify it's a winning hand
     const tileStr = hand.map(t => tileToIndex(t).toString()).join('');
-    const handObj = tilesToHand(tileStr, RuleSet.RIICHI_MAHJONG);
+    const handObj = tilesToHand(tileStr);
 
     if (handObj.shanten === -1) {
       return NextResponse.json({ hand });

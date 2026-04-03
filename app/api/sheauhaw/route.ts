@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { tilesToHand, RuleSet } from 'mahjong-tile-efficiency';
+// @ts-ignore - type declaration bug: exports tilesToHand but .d.ts says tilesTohand
+import { tilesToHand } from 'mahjong-tile-efficiency';
 
 function tileToIndex(tile: string): number {
   const suit = tile.slice(-1);
@@ -11,19 +12,20 @@ function tileToIndex(tile: string): number {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { hand = [], mode = 16, wildcards = {} } = body;
+    const { hand = [] as string[], mode = 16, wildcards = {} } = body;
 
     // Calculate shanten using mahjong-tile-efficiency
-    const tileStr = hand
-      .filter(t => !t.endsWith('j'))
-      .map(t => tileToIndex(t).toString())
+    const tileStr = (hand as string[])
+      .filter((t: string) => !t.endsWith('j'))
+      .map((t: string) => tileToIndex(t).toString())
       .join('');
 
     let shanten = 8;
     let waiting: string[] = [];
 
     try {
-      const handObj = tilesToHand(tileStr, RuleSet.RIICHI_MAHJONG);
+      // @ts-ignore - type declaration bug: exports tilesToHand but .d.ts says tilesTohand
+      const handObj = tilesToHand(tileStr);
       shanten = handObj.shanten;
 
       // Get waiting tiles if tenpai
