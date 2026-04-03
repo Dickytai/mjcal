@@ -1,0 +1,11 @@
+{"type":"click","text":"A\n      \n        直接移植\n        保持現有 UI 100% 不變，只移植代碼到 Next.js。快速部署，技術乾淨。","choice":"direct","id":null,"timestamp":1775224655785}
+{"type":"click","text":"B\n      \n        現代化 + 保留外觀\n        重構代碼為 React + Tailwind，但保持相同顏色、布局、按鈕位置。","choice":"modernize","id":null,"timestamp":1775224656814}
+{"type":"click","text":"A\n      \n        直接移植\n        保持現有 UI 100% 不變，只移植代碼到 Next.js。快速部署，技術乾淨。","choice":"direct","id":null,"timestamp":1775224658792}
+{"type":"click","text":"B\n      \n        現代化 + 保留外觀\n        重構代碼為 React + Tailwind，但保持相同顏色、布局、按鈕位置。","choice":"modernize","id":null,"timestamp":1775224665279}
+{"type":"click","text":"B\n      \n        現代化 + 保留外觀\n        重構代碼為 React + Tailwind，但保持相同顏色、布局、按鈕位置。","choice":"modernize","id":null,"timestamp":1775224666233}
+{"type":"click","text":"B\n      \n        現代化 + 保留外觀\n        重構代碼為 React + Tailwind，但保持相同顏色、布局、按鈕位置。","choice":"modernize","id":null,"timestamp":1775224666412}
+{"type":"click","text":"B\n      \n        現代化 + 保留外觀\n        重構代碼為 React + Tailwind，但保持相同顏色、布局、按鈕位置。","choice":"modernize","id":null,"timestamp":1775224668441}
+{"type":"click","text":"B\n      \n        現代化 + 保留外觀\n        重構代碼為 React + Tailwind，但保持相同顏色、布局、按鈕位置。","choice":"modernize","id":null,"timestamp":1775224677030}
+{"type":"click","text":"B\n      \n        現代化 + 保留外觀\n        重構代碼為 React + Tailwind，但保持相同顏色、布局、按鈕位置。","choice":"modernize","id":null,"timestamp":1775224677757}
+{"type":"click","text":"B\n      \n        現代化 + 保留外觀\n        重構代碼為 React + Tailwind，但保持相同顏色、布局、按鈕位置。","choice":"modernize","id":null,"timestamp":1775224677931}
+{"type":"click","text":"B\n      \n        現代化 + 保留外觀\n        重構代碼為 React + Tailwind，但保持相同顏色、布局、按鈕位置。","choice":"modernize","id":null,"timestamp":1775224679883}
