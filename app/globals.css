@@ -850,10 +850,13 @@ h3 {
 @media (max-width: 600px) {
     body {
         padding: var(--space-md);
+        padding-bottom: 160px;
+        font-size: 15px;
     }
 
     h1 {
-        font-size: 1.3em;
+        font-size: 1.2em;
+        margin: var(--space-md) 0;
     }
 
     h1::before,
@@ -861,12 +864,34 @@ h3 {
         display: none;
     }
 
+    h3 {
+        font-size: 11px;
+    }
+
     .mode-select {
         gap: var(--space-sm);
+        margin: var(--space-md) 0;
     }
 
     .mode-btn {
         padding: var(--space-sm) var(--space-lg);
+        font-size: 13px;
+        min-height: 40px;
+    }
+
+    .tile-count {
+        padding: var(--space-sm) var(--space-md);
+        font-size: 12px;
+        margin: var(--space-md) auto;
+    }
+
+    .tile-section {
+        margin: var(--space-lg) 0;
+        padding: var(--space-md);
+    }
+
+    .tile-grid {
+        gap: 6px;
     }
 
     .tile {
@@ -876,24 +901,108 @@ h3 {
     }
 
     .tile-btn {
-        width: 36px;
-        height: 48px;
-        font-size: 20px;
+        width: 44px;
+        height: 56px;
+        font-size: 24px;
+        min-height: 44px;
+        min-width: 44px;
+    }
+
+    .tile-btn.wild {
+        font-size: 9px;
     }
 
     .btn-row {
         flex-direction: column;
+        gap: var(--space-sm);
     }
 
     .btn-row button {
         width: 100%;
+        min-height: 48px;
+        font-size: 14px;
+        padding: var(--space-sm) var(--space-md);
+    }
+
+    .code-input {
+        padding: var(--space-md);
+        margin: var(--space-lg) 0;
+    }
+
+    .code-input input {
+        padding: var(--space-sm) var(--space-md);
+        font-size: 13px;
+    }
+
+    .code-input button {
+        padding: var(--space-sm) var(--space-md);
+    }
+
+    #extraInfoRow {
+        padding: var(--space-md);
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-sm);
+    }
+
+    #extraInfoRow > div {
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: var(--space-sm);
+    }
+
+    #extraInfoRow label {
+        font-size: 14px;
+        padding: var(--space-xs) var(--space-sm);
+    }
+
+    #extraFanSection {
+        padding: var(--space-md);
+    }
+
+    .display-section {
+        margin: var(--space-lg) 0;
+    }
+
+    .tile-display {
+        padding: var(--space-sm);
+        min-height: 60px;
     }
 
     .shanten {
-        font-size: 36px;
+        font-size: 32px;
+    }
+
+    .shanten-value {
+        font-size: 48px;
     }
 
     .total-fans .value {
         font-size: 36px;
+    }
+
+    .waiting-item {
+        width: 40px;
+        height: 54px;
+        font-size: 20px;
+    }
+
+    .result-section {
+        padding: var(--space-lg);
+        margin: var(--space-lg) 0;
+    }
+
+    .result-box {
+        padding: var(--space-lg);
+    }
+
+    .modal-content {
+        padding: var(--space-lg);
+        max-width: 95%;
+    }
+
+    .tip {
+        font-size: 10px;
+        margin: var(--space-md) 0;
     }
 }
